@@ -114,17 +114,65 @@ TOOLS = [
         },
     },
     {
+        "name": "count_defects_by_reason",
+        "description": (
+            "불량 원인(가스/미성형/초기허용불량)별 건수와 비중을 센다. "
+            "'가스랑 미성형 중에 뭐가 더 자주 나?', '불량 원인 중에 뭐가 제일 비중이 커?' "
+            "같은 질문에 사용."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "part_code": {"type": "string", "description": "품번 코드(선택). 'CN7' 또는 'RG3'."},
+            },
+        },
+    },
+    {
+        "name": "get_recent_defects",
+        "description": (
+            "가장 최근에 발생한 불량을 한 건씩 조회한다. 각 건마다 같은 품번·같은 운전 조건의 "
+            "정상 제품과 비교해 크게 벗어난 값을 함께 돌려준다. "
+            "'최근 불량 5건 원인 알려줘', '방금 난 불량 왜 그래?' 같은 질문에 사용."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "조회할 건수. 기본 5건."},
+            },
+        },
+    },
+    {
+        "name": "check_variable",
+        "description": (
+            "특정 값 하나가 불량과 관계있는지만 콕 집어 확인한다. "
+            "'금형온도가 불량이랑 관계있어?', '사출압력이 영향을 미쳐?', "
+            "'지금 배럴온도 설정 괜찮아?'처럼 값을 지정한 질문에는 "
+            "compare_normal_vs_defect 대신 반드시 이 도구를 사용한다. "
+            "(compare_normal_vs_defect는 상위 몇 개만 돌려주므로, 지정한 값이 "
+            "목록에 없으면 답할 수 없다.) part_code는 필수다."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "variable": {
+                    "type": "string",
+                    "description": ("확인할 값의 현장 용어. 사출속도, 사출시간, 충전시간, 사출압력, "
+                                    "보압, 배압, 금형온도, 배럴온도, 호퍼온도, 스크류회전수, "
+                                    "사이클타임, 가소화시간, 쿠션위치, 형체시간 중 하나."),
+                },
+                "reason": {"type": "string", "description": "불량 원인(선택). 생략하면 전체 불량 대상."},
+                "part_code": {"type": "string", "description": "품번 코드. 'CN7' 또는 'RG3'. 필수."},
+                "mode": {"type": "string", "description": "운전 조건(선택). '저속' 또는 '고속'."},
+            },
+            "required": ["variable", "part_code"],
+        },
+    },
+    {
         "name": "check_answerable",
         "description": (
             "질문이 현재 데이터로 답변 가능한지(O), 조건부 가능한지(Δ), 불가능한지(X) 확인한다. "
             "다른 도구를 호출하기 전에, 특히 '왜~', '~하면 뭐가 달라져?' 류의 애매한 질문에는 "
-            "먼저 이 도구로 답변 가능 여부부터 확인한다. "
-            "question_tag는 새로 지어내지 말고 아래 등록된 태그 중 뜻이 가장 가까운 것을 "
-            "그대로 사용한다 (완전히 새로운 주제일 때만 새 영어 태그를 만든다): "
-            "gas_vs_normal(가스 불량 원인 비교), worst_day(불량 많았던 날), "
-            "part_defect_rate(품번별 불량률), cycle_time_5_6(5vs6번 사이클타임 비교), "
-            "day_vs_night(주간vs야간 불량 비교, '야간에 왜 불량이 많아' 류 질문은 반드시 이 태그), "
-            "equipment_compare(설비 간 비교), predict_next_defect(다음 불량 예측)."
+            "먼저 이 도구로 답변 가능 여부부터 확인한다."
         ),
         "input_schema": {
             "type": "object",
@@ -167,11 +215,29 @@ SYSTEM_PROMPT = """\
   "우선 확인해볼 값입니다"처럼 표현하고, 몇 건 기준인지 함께 밝히세요.
 - 표본 건수를 스스로 "충분하다"고 평가하지 마세요. 건수만 사실대로 밝히세요.
 
+[할 수 없는 것을 제안하지 않기 — 매우 중요]
+- 답할 수 없다고 말한 뒤에, 도구 목록에 없는 분석을 대안으로 제시하지 마세요.
+  못 하는 것을 할 수 있다고 광고하는 셈이며, 다음 질문에서 바로 들통납니다.
+- 대안을 제시할 때는 반드시 지금 가진 도구로 실제 실행 가능한 것만 말하세요.
+- 특히 주야간 비교, 교대조 비교, 불량 확률 예측, 원료 로트 분석은
+  이 데이터로 불가능합니다. 절대 제안하지 마세요.
+- suggest_action이 has_verified_rule=false를 돌려주면, 검증된 조치안이 없다는 사실을
+  밝히고 "확인해볼 값"만 제시하세요. 조치를 지어내지 마세요.
+
 [되묻지 않기]
 - 현장 작업자는 몰라서 물어본 것입니다. 사용자에게 원인을 되묻지 마세요.
   ("그날 무슨 일이 있었나요?", "설정을 바꾸셨나요?" 같은 질문 금지)
+- 품번을 모르면 사용자에게 묻지 말고 list_part_codes로 직접 확인하세요.
 - 대신 도구를 더 호출해 직접 알아내거나, 다음에 무엇을 분석할지 제안하세요.
   예: "이어서 그날 불량의 원인을 분석해 드릴까요?"
+
+[값을 지정한 질문]
+- "금형온도가 관계있어?"처럼 특정 값을 지목한 질문에는 반드시 check_variable을 쓰세요.
+  compare_normal_vs_defect는 상위 몇 개만 돌려주므로 그 값이 없을 수 있습니다.
+
+[답변 길이]
+- 핵심 3가지 이내로 간결하게 쓰세요. 이모지는 쓰지 않습니다.
+- 표로 보여줄 수 있는 것은 표로 정리하세요.
 
 [숫자 표기]
 - 컬럼 영문명 대신 현장 용어를 쓰세요.
@@ -190,6 +256,12 @@ FUNCTION_MAP = {
     "suggest_action": lambda df, **kw: f.suggest_action(
         df, kw["reason"], part_code=kw.get("part_code")),
     "list_part_codes": lambda df, **kw: f.list_part_codes(df, kw.get("reason")),
+    "count_defects_by_reason": lambda df, **kw: f.count_defects_by_reason(
+        df, part_code=kw.get("part_code")),
+    "get_recent_defects": lambda df, **kw: f.get_recent_defects(df, n=kw.get("n", 5)),
+    "check_variable": lambda df, **kw: f.check_variable(
+        df, kw["variable"], reason=kw.get("reason"),
+        part_code=kw.get("part_code"), mode=kw.get("mode")),
     "check_answerable": lambda df, **kw: f.check_answerable(kw["question_tag"]),
 }
 

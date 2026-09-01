@@ -79,9 +79,29 @@ def get_worst_day(df: pd.DataFrame, top_n: int = 5) -> dict:
     daily = daily.sort_values("fail_rate_pct", ascending=False)
 
     top = daily.head(top_n).reset_index()
+    worst_date = str(top.iloc[0]["date"]) if len(top) else None
+
+    # 그날 무엇을 어떤 조건으로 생산했는지 함께 알려줍니다.
+    # (불량률이 높은 날은 특정 품번·조건만 돌린 날인 경우가 많습니다.)
+    context = []
+    if worst_date:
+        that_day = df[df["date"].astype(str) == worst_date]
+        for pc, g in that_day.groupby("part_code"):
+            entry = {"part_code": pc, "count": len(g)}
+            info = detect_operating_modes(df, pc)
+            if info.get("has_modes"):
+                col, thr = info["split_variable"], info["threshold"]
+                n_low = int((g[col] < thr).sum())
+                entry["mode_mix"] = {"저속": n_low, "고속": len(g) - n_low}
+            context.append(entry)
+
     return {
-        "worst_date": str(top.iloc[0]["date"]) if len(top) else None,
+        "worst_date": worst_date,
         "worst_fail_rate_pct": float(top.iloc[0]["fail_rate_pct"]) if len(top) else None,
+        "worst_day_production": context,
+        "hint": ("불량률이 높은 날은 특정 품번이나 운전 조건만 돌린 날일 수 있습니다. "
+                 "worst_day_production을 확인하고, 필요하면 get_operating_modes로 "
+                 "그 조건의 불량률을 비교하세요."),
         "table": top.to_dict(orient="records"),
     }
 
@@ -101,6 +121,10 @@ MIN_PCT_DIFF = 2.0       # 정상값 대비 이보다 작게 차이나면 현장
 # 예: CN7의 스크류 회전수는 29 아니면 292로만 나오고, 그 사이 값이 없습니다.
 #     이때 평균 124.7은 실제로 존재하지 않는 값이라 비교 기준이 될 수 없습니다.
 #     (실제로 이 두 조건의 불량률은 0.05% vs 1.50%로 30배 차이납니다.)
+MIN_MODE_RATIO = 0.03   # 한쪽 조건이 전체의 3% 이상이면 별개 조건으로 봅니다
+MIN_MODE_COUNT = 30     # 다만 건수 자체가 이보다 적으면 노이즈로 봅니다
+
+
 def _find_mode_threshold(s: pd.Series, min_gap_ratio: float = 0.3):
     """값들을 정렬했을 때 중간에 큰 빈 구간이 있으면 그 지점을 경계로 돌려줍니다.
     빈 구간이 없으면(= 값이 고르게 퍼져 있으면) None을 돌려줍니다.
@@ -120,8 +144,11 @@ def _find_mode_threshold(s: pd.Series, min_gap_ratio: float = 0.3):
     threshold = float((v[i] + v[i + 1]) / 2)
 
     low, high = s[s < threshold], s[s >= threshold]
-    if min(len(low), len(high)) / len(s) < 0.15:
-        return None  # 한쪽이 너무 작으면 이상치일 뿐, 별개 조건이 아님
+    smaller = min(len(low), len(high))
+    # 적게 돌린 조건이라도 실제로 존재하면 잡아내야 합니다.
+    # (RG3 저속은 전체의 5.5%뿐이지만 불량률이 고속의 4배가 넘습니다.)
+    if smaller < MIN_MODE_COUNT or smaller / len(s) < MIN_MODE_RATIO:
+        return None
 
     # 두 덩어리 사이의 간격이, 각 덩어리 내부의 흩어짐보다 훨씬 커야
     # 진짜로 "다른 조건"이라고 볼 수 있습니다.
@@ -314,6 +341,172 @@ def compare_normal_vs_defect(df: pd.DataFrame, reason: str, part_code: str = Non
 # 원인별 조치 제안은 "데이터가 지목한 변수 + 공정 상식"을 결합해서 만듭니다.
 # 완전 자동화하기보다, 팀이 검증한 조치 문구를 미리 정의해두고
 # compare_normal_vs_defect() 결과의 상위 변수와 매칭하는 방식을 추천합니다.
+# ---------------------------------------------------------------------
+# 원인별 집계 — "가스랑 미성형 중에 뭐가 더 자주 나요?"
+# ---------------------------------------------------------------------
+def count_defects_by_reason(df: pd.DataFrame, part_code: str = None) -> dict:
+    """불량 원인별 건수와 비중을 세어 돌려줍니다."""
+    sub = df[df["part_code"] == part_code] if part_code else df
+    if part_code and len(sub) == 0:
+        return {"error": f"'{part_code}' 품번 데이터가 없습니다."}
+
+    total = len(sub)
+    n_fail = int((sub["PassOrFail"] == "N").sum())
+    counts = sub["Reason"].value_counts()
+
+    rows = [{
+        "reason": r,
+        "count": int(c),
+        "share_of_defects_pct": round(c / n_fail * 100, 1) if n_fail else 0.0,
+        "rate_of_production_pct": round(c / total * 100, 3) if total else 0.0,
+    } for r, c in counts.items()]
+
+    return {
+        "part_code": part_code,
+        "total_production": total,
+        "total_defects": n_fail,
+        "overall_defect_rate_pct": round(n_fail / total * 100, 2) if total else 0.0,
+        "by_reason": rows,
+    }
+
+
+# ---------------------------------------------------------------------
+# 최근 불량 개별 조회 — "가장 최근 불량 5건의 원인을 각각 알려줘"
+# ---------------------------------------------------------------------
+def get_recent_defects(df: pd.DataFrame, n: int = 5) -> dict:
+    """가장 최근에 발생한 불량을 하나씩 돌려줍니다.
+    각 건마다, 같은 품번·같은 운전 조건의 정상 제품과 비교해
+    가장 크게 벗어난 값 두 개를 함께 알려줍니다.
+    """
+    fails = df[df["PassOrFail"] == "N"].sort_values("TimeStamp", ascending=False).head(n)
+    if len(fails) == 0:
+        return {"error": "불량 데이터가 없습니다.", "defects": []}
+
+    items = []
+    for _, row in fails.iterrows():
+        pc = row["part_code"]
+        peers = df[(df["part_code"] == pc) & (df["PassOrFail"] == "Y")]
+
+        # 같은 운전 조건의 정상 제품하고만 비교합니다
+        info = detect_operating_modes(df, pc) if pd.notna(pc) else {"has_modes": False}
+        if info.get("has_modes"):
+            col, thr = info["split_variable"], info["threshold"]
+            peers = peers[peers[col] < thr] if row[col] < thr else peers[peers[col] >= thr]
+
+        outliers = []
+        if len(peers) >= 30:
+            for c in SENSOR_COLS:
+                m, sd = peers[c].mean(), peers[c].std()
+                if not sd or sd <= 0 or not m:
+                    continue
+                pct = abs(row[c] - m) / abs(m) * 100
+                if pct < MIN_PCT_DIFF:
+                    continue
+                outliers.append({"variable": c, "value": round(float(row[c]), 2),
+                                 "normal_mean": round(float(m), 2),
+                                 "pct_diff": round(pct, 1),
+                                 "z_score": round(float((row[c] - m) / sd), 2)})
+            outliers.sort(key=lambda r: abs(r["z_score"]), reverse=True)
+
+        items.append({
+            "timestamp": str(row["TimeStamp"]),
+            "part_code": pc,
+            "part_name": row["PART_NAME"],
+            "reason": row["Reason"] if pd.notna(row["Reason"]) else "사유 미기재",
+            "notable_values": outliers[:2],
+        })
+
+    return {
+        "note": "각 건은 같은 품번·같은 운전 조건의 정상 제품과 비교한 결과입니다.",
+        "caution": "한 건만으로는 원인을 단정할 수 없습니다. 확인해볼 값으로만 제시하세요.",
+        "defects": items,
+    }
+
+
+# ---------------------------------------------------------------------
+# 특정 변수 확인 — "금형온도가 불량이랑 관계있어요?"
+# ---------------------------------------------------------------------
+# 현장에서 쓰는 말 -> 실제 컬럼 이름
+VARIABLE_ALIASES = {
+    "사출속도": ["Max_Injection_Speed"],
+    "사출시간": ["Injection_Time"],
+    "충전시간": ["Filling_Time"],
+    "사출압력": ["Max_Injection_Pressure"],
+    "보압": ["Max_Switch_Over_Pressure"],
+    "배압": ["Max_Back_Pressure", "Average_Back_Pressure"],
+    "금형온도": ["Mold_Temperature_1", "Mold_Temperature_2",
+             "Mold_Temperature_3", "Mold_Temperature_4"],
+    "배럴온도": [f"Barrel_Temperature_{i}" for i in range(1, 8)],
+    "호퍼온도": ["Hopper_Temperature"],
+    "스크류회전수": ["Max_Screw_RPM", "Average_Screw_RPM"],
+    "사이클타임": ["Cycle_Time"],
+    "가소화시간": ["Plasticizing_Time"],
+    "쿠션위치": ["Cushion_Position"],
+    "형체시간": ["Clamp_Close_Time"],
+}
+
+
+def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
+                   part_code: str = None, mode: str = None) -> dict:
+    """특정 변수 하나가 불량과 관계있는지만 콕 집어 확인합니다.
+    compare_normal_vs_defect는 상위 몇 개만 돌려주기 때문에,
+    "금형온도가 관계있어요?"처럼 변수를 지정한 질문에는 이 함수를 씁니다.
+    """
+    cols = VARIABLE_ALIASES.get(variable.replace(" ", ""))
+    if not cols:
+        cols = [c for c in SENSOR_COLS if c.lower() == variable.lower()]
+    if not cols:
+        return {"error": f"'{variable}'에 해당하는 값을 찾을 수 없습니다.",
+                "available": list(VARIABLE_ALIASES.keys())}
+
+    if part_code:
+        sub, _ = _apply_mode(df, part_code, mode) if mode else (
+            df[df["part_code"] == part_code], None)
+    else:
+        return {"error": "품번을 지정해야 합니다. 품번마다 설정값이 달라 뭉쳐서 보면 안 됩니다.",
+                "hint": "part_code에 'CN7' 또는 'RG3'을 넣어주세요."}
+
+    normal = sub[sub["PassOrFail"] == "Y"]
+    target = sub[sub["Reason"] == reason] if reason else sub[sub["PassOrFail"] == "N"]
+
+    if len(target) < MIN_DEFECT_SAMPLES:
+        return {"variable": variable, "part_code": part_code, "mode": mode,
+                "n_defect": len(target), "skipped": True,
+                "note": f"불량 표본이 {len(target)}건뿐이라 비교할 수 없습니다."}
+
+    results = []
+    for c in cols:
+        m, sd, t = normal[c].mean(), normal[c].std(), target[c].mean()
+        if not sd or sd <= 0:
+            results.append({"column": c, "note": "정상군에서 값이 변하지 않아 비교 불가"})
+            continue
+        pct = abs(t - m) / abs(m) * 100 if m else 0.0
+        results.append({
+            "column": c,
+            "normal_mean": round(float(m), 2),
+            "defect_mean": round(float(t), 2),
+            "pct_diff": round(pct, 1),
+            "z_score": round(float((t - m) / sd), 2),
+            "meaningful": bool(pct >= MIN_PCT_DIFF),
+        })
+
+    any_meaningful = any(r.get("meaningful") for r in results)
+    return {
+        "variable": variable,
+        "reason": reason,
+        "part_code": part_code,
+        "mode": mode,
+        "n_defect": len(target),
+        "n_normal": len(normal),
+        "low_sample_warning": len(target) < LOW_SAMPLE_LIMIT,
+        "related": any_meaningful,
+        "conclusion": ("불량군과 뚜렷한 차이가 있습니다." if any_meaningful
+                       else "불량군과 정상군 사이에 뚜렷한 차이가 없습니다. "
+                            "이 값은 원인으로 보기 어렵습니다."),
+        "details": results,
+    }
+
+
 ACTION_RULES = {
     ("가스", "CN7"): [
         "먼저 운전 조건 확인 — 고속(스크류 약 292) 조건의 불량률이 1.50%로 "
@@ -349,11 +542,23 @@ def suggest_action(df: pd.DataFrame, reason: str, part_code: str = None) -> dict
 
     if part_code:
         actions = ACTION_RULES.get((reason, part_code), [])
+        if not actions:
+            return {
+                "reason": reason,
+                "part_code": part_code,
+                "actions": [],
+                "has_verified_rule": False,
+                "note": (f"'{reason} / {part_code}' 조합에 대해서는 팀이 검증한 조치안이 "
+                         "아직 없습니다. 조치를 지어내지 말고, 검증된 조치가 없다는 사실을 "
+                         "밝힌 뒤 compare_normal_vs_defect 결과를 근거로 "
+                         "'확인해볼 값'만 제시하세요."),
+                "part_defect_rate_pct": float(part_rate.get(part_code, 0)),
+            }
         return {
             "reason": reason,
             "part_code": part_code,
             "actions": actions,
-            "has_verified_rule": len(actions) > 0,
+            "has_verified_rule": True,
             "part_defect_rate_pct": float(part_rate.get(part_code, 0)),
         }
 
@@ -398,8 +603,15 @@ def check_answerable(question_tag: str) -> dict:
       2) 왜 답할 수 없는지 데이터 근거를 든다
       3) 대신 할 수 있는 것을 제안한다
     """
-    status, reason = QUESTION_CATALOG.get(question_tag, ("UNKNOWN", "카탈로그에 없는 질문 태그입니다."))
-    return {"question_tag": question_tag, "status": status, "reason": reason}
+    status, reason = QUESTION_CATALOG.get(
+        question_tag, ("UNKNOWN", "카탈로그에 없는 질문 태그입니다."))
+    result = {"question_tag": question_tag, "status": status, "reason": reason}
+    if status == "UNKNOWN":
+        result["guidance"] = (
+            "이 질문은 사전에 검토되지 않았습니다. 다른 도구로 실제 데이터를 "
+            "확인할 수 있으면 확인하고, 확인할 도구가 없으면 답할 수 없다고 "
+            "밝히세요. 추측으로 답하지 마세요.")
+    return result
 
 
 if __name__ == "__main__":
