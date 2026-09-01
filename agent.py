@@ -55,8 +55,30 @@ TOOLS = [
                     "type": "string",
                     "description": "품번 코드. 'CN7' 또는 'RG3'. 지정하지 않으면 전체 품번별 결과.",
                 },
+                "mode": {
+                    "type": "string",
+                    "description": (
+                        "운전 조건. '저속' 또는 '고속'. 한 품번 안에서도 조건이 갈리는 경우에만 사용. "
+                        "지정하지 않으면 조건별 결과를 모두 돌려준다."
+                    ),
+                },
             },
             "required": ["reason"],
+        },
+    },
+    {
+        "name": "get_operating_modes",
+        "description": (
+            "한 품번 안에 서로 다른 운전 조건이 있는지 확인하고, 조건별 불량률을 알려준다. "
+            "'CN7 불량 왜 나?', '조건별로 차이 있어?' 같은 질문이나, "
+            "원인 분석 전에 조건이 갈리는지 확인할 때 사용."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "part_code": {"type": "string", "description": "품번 코드. 'CN7' 또는 'RG3'."},
+            },
+            "required": ["part_code"],
         },
     },
     {
@@ -128,9 +150,22 @@ SYSTEM_PROMPT = """\
 - 한 품번에서 나온 결론을 다른 품번에 적용하지 마세요.
 - 여러 품번의 값을 평균 내어 "목표값"으로 제시하지 마세요. 어느 품번에도 맞지 않습니다.
 
+[운전 조건 원칙 — 품번 다음으로 중요]
+- 같은 품번 안에서도 서로 다른 조건으로 돌리는 경우가 있습니다.
+  예: CN7의 스크류 회전수는 29 아니면 292이고, 평균 124.7은 존재하지 않는 값입니다.
+- 조건이 갈리는 품번은 조건별로 나누어 말하세요. 조건별 불량률 차이를 먼저 알려주세요.
+- 실제 사례: CN7 고속 조건 1.50% vs 저속 조건 0.05%로 30배 차이납니다.
+
 [표본이 적을 때]
 - low_sample_warning이 true이면 "원인입니다"라고 단정하지 말고
   "우선 확인해볼 값입니다"처럼 표현하고, 몇 건 기준인지 함께 밝히세요.
+- 표본 건수를 스스로 "충분하다"고 평가하지 마세요. 건수만 사실대로 밝히세요.
+
+[되묻지 않기]
+- 현장 작업자는 몰라서 물어본 것입니다. 사용자에게 원인을 되묻지 마세요.
+  ("그날 무슨 일이 있었나요?", "설정을 바꾸셨나요?" 같은 질문 금지)
+- 대신 도구를 더 호출해 직접 알아내거나, 다음에 무엇을 분석할지 제안하세요.
+  예: "이어서 그날 불량의 원인을 분석해 드릴까요?"
 
 [숫자 표기]
 - 컬럼 영문명 대신 현장 용어를 쓰세요.
@@ -144,7 +179,8 @@ SYSTEM_PROMPT = """\
 FUNCTION_MAP = {
     "get_worst_day": lambda df, **kw: f.get_worst_day(df),
     "compare_normal_vs_defect": lambda df, **kw: f.compare_normal_vs_defect(
-        df, kw["reason"], part_code=kw.get("part_code")),
+        df, kw["reason"], part_code=kw.get("part_code"), mode=kw.get("mode")),
+    "get_operating_modes": lambda df, **kw: f.detect_operating_modes(df, kw["part_code"]),
     "suggest_action": lambda df, **kw: f.suggest_action(
         df, kw["reason"], part_code=kw.get("part_code")),
     "list_part_codes": lambda df, **kw: f.list_part_codes(df, kw.get("reason")),
