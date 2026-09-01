@@ -17,6 +17,8 @@ import pandas as pd
 DATA_PATH = "labeled_data.csv"
 
 # 사용할 센서 컬럼들 (전처리된 45개 컬럼 중 분석에 쓰는 것들)
+# 주의: 일련번호(PART_FACT_SERIAL)처럼 공정과 무관한 숫자 컬럼은 절대 넣지 말 것.
+#      숫자라서 계산은 되지만, "몇 번째로 생산된 제품인가"는 원인이 될 수 없음.
 SENSOR_COLS = [
     "Injection_Time", "Filling_Time", "Plasticizing_Time", "Cycle_Time",
     "Clamp_Close_Time", "Cushion_Position", "Switch_Over_Position",
@@ -26,8 +28,13 @@ SENSOR_COLS = [
     "Barrel_Temperature_1", "Barrel_Temperature_2", "Barrel_Temperature_3",
     "Barrel_Temperature_4", "Barrel_Temperature_5", "Barrel_Temperature_6",
     "Barrel_Temperature_7", "Hopper_Temperature",
+    "Mold_Temperature_1", "Mold_Temperature_2",
     "Mold_Temperature_3", "Mold_Temperature_4",
 ]
+
+# 품번(PART_NAME)에서 앞부분 코드만 뽑아내기 위한 패턴
+# 예: "CN7 W/S SIDE MLD'G RH" -> "CN7"
+PART_CODE_PATTERN = r"^(CN7|RG3|SP2|JX1)"
 
 
 def load_data() -> pd.DataFrame:
@@ -38,7 +45,25 @@ def load_data() -> pd.DataFrame:
     df = pd.read_csv(DATA_PATH)
     df["TimeStamp"] = pd.to_datetime(df["TimeStamp"])
     df["date"] = df["TimeStamp"].dt.date
+    # 품번 코드(CN7/RG3 등)를 미리 뽑아둡니다. 품번별 비교에 사용합니다.
+    df["part_code"] = df["PART_NAME"].str.extract(PART_CODE_PATTERN)
     return df
+
+
+def list_part_codes(df: pd.DataFrame, reason: str = None) -> dict:
+    """분석에 쓸 수 있는 품번 목록과 각 품번의 불량 건수를 알려줍니다.
+    agent가 '어떤 품번으로 비교할지' 정할 때 참고합니다.
+    """
+    rows = []
+    for code, g in df.groupby("part_code"):
+        n_defect = (g["Reason"] == reason).sum() if reason else (g["PassOrFail"] == "N").sum()
+        rows.append({
+            "part_code": code,
+            "total": len(g),
+            "n_defect": int(n_defect),
+        })
+    rows.sort(key=lambda r: r["n_defect"], reverse=True)
+    return {"reason": reason, "parts": rows}
 
 
 # ---------------------------------------------------------------------
@@ -64,37 +89,82 @@ def get_worst_day(df: pd.DataFrame, top_n: int = 5) -> dict:
 # ---------------------------------------------------------------------
 # STEP 2. 원인 추적 (★핵심) — "가스 불량 났을 때 정상 제품이랑 뭐가 제일 달랐어요?"
 # ---------------------------------------------------------------------
-def compare_normal_vs_defect(df: pd.DataFrame, reason: str, top_n: int = 8) -> dict:
-    """특정 불량 원인(reason) 그룹과 정상 그룹의 센서값을 비교합니다.
-    z-score(정상군 표준편차 대비 몇 배 벗어났는지)로 정렬해서
-    '차이가 큰 순서'로 변수를 보여줍니다.
-    """
-    normal = df[df["PassOrFail"] == "Y"]
-    target = df[df["Reason"] == reason]
+MIN_DEFECT_SAMPLES = 5  # 이보다 적으면 비교 자체를 하지 않습니다
 
-    if len(target) == 0:
-        return {"error": f"'{reason}' 원인에 해당하는 데이터가 없습니다.", "n_samples": 0}
+
+def _compare_within(sub: pd.DataFrame, reason: str, top_n: int) -> dict:
+    """하나의 품번 안에서만 불량군과 정상군을 비교하는 내부 함수."""
+    normal = sub[sub["PassOrFail"] == "Y"]
+    target = sub[sub["Reason"] == reason]
+
+    if len(target) < MIN_DEFECT_SAMPLES:
+        return {
+            "n_defect": len(target),
+            "skipped": True,
+            "note": f"불량 표본이 {len(target)}건뿐이라 비교를 생략했습니다.",
+        }
 
     rows = []
     for col in SENSOR_COLS:
         n_mean, n_std = normal[col].mean(), normal[col].std()
         t_mean = target[col].mean()
-        z = (t_mean - n_mean) / n_std if n_std and n_std > 0 else None
+        if not n_std or n_std <= 0:
+            continue  # 정상군 안에서 값이 전혀 변하지 않는 컬럼은 비교 의미가 없음
         rows.append({
             "variable": col,
             "normal_mean": round(n_mean, 2),
             "defect_mean": round(t_mean, 2),
-            "z_score": round(z, 2) if z is not None else None,
+            "z_score": round((t_mean - n_mean) / n_std, 2),
         })
 
-    rows.sort(key=lambda r: abs(r["z_score"]) if r["z_score"] is not None else 0, reverse=True)
+    rows.sort(key=lambda r: abs(r["z_score"]), reverse=True)
+
+    return {
+        "n_defect": len(target),
+        "n_normal": len(normal),
+        "skipped": False,
+        # 표본이 적으면 "확정"이 아니라 "우선 확인 대상"으로 말하게 하는 신호
+        "low_sample_warning": len(target) < 20,
+        "top_differences": rows[:top_n],
+    }
+
+
+def compare_normal_vs_defect(df: pd.DataFrame, reason: str,
+                             part_code: str = None, top_n: int = 5) -> dict:
+    """특정 불량 원인(reason) 그룹과 정상 그룹의 센서값을 비교합니다.
+
+    ★ 반드시 '같은 품번 안에서' 비교합니다.
+       품번이 다르면 금형과 설정값 자체가 달라서, 전체를 한꺼번에 비교하면
+       "불량이라서 다른 것"과 "품번이라서 다른 것"이 뒤섞입니다.
+       (실제로 이 데이터에서 사출속도는 CN7 55.5 / RG3 128.2로 두 배 넘게 다릅니다.
+        섞어서 비교하면 사출속도가 원인인 것처럼 보이지만, 같은 품번 안에서는
+        정상과 불량의 사출속도가 거의 같습니다.)
+
+    part_code를 지정하지 않으면 품번별로 각각 따로 비교해서 모두 돌려줍니다.
+    """
+    if reason not in df["Reason"].dropna().unique():
+        return {"error": f"'{reason}' 원인에 해당하는 데이터가 없습니다.", "n_defect": 0}
+
+    if part_code:
+        sub = df[df["part_code"] == part_code]
+        if len(sub) == 0:
+            return {"error": f"'{part_code}' 품번 데이터가 없습니다."}
+        result = _compare_within(sub, reason, top_n)
+        result.update({"reason": reason, "part_code": part_code,
+                       "compared_within_part": True})
+        return result
+
+    # 품번 지정이 없으면 품번별로 나눠서 전부 비교
+    by_part = {}
+    for code, g in df.groupby("part_code"):
+        by_part[code] = _compare_within(g, reason, top_n)
 
     return {
         "reason": reason,
-        "n_samples": len(target),
-        # 표본이 20건 이하면 "참고용" 수준이라는 걸 answerability_check에서 같이 처리합니다.
-        "low_sample_warning": len(target) <= 20,
-        "top_differences": rows[:top_n],
+        "compared_within_part": True,
+        "note": ("품번마다 금형과 설정값이 달라 원인도 다를 수 있으므로 "
+                 "품번별로 나누어 비교한 결과입니다. 품번을 뭉쳐서 비교하면 안 됩니다."),
+        "by_part": by_part,
     }
 
 
@@ -105,31 +175,58 @@ def compare_normal_vs_defect(df: pd.DataFrame, reason: str, top_n: int = 8) -> d
 # 완전 자동화하기보다, 팀이 검증한 조치 문구를 미리 정의해두고
 # compare_normal_vs_defect() 결과의 상위 변수와 매칭하는 방식을 추천합니다.
 ACTION_RULES = {
-    "가스": [
-        "사출속도(Max_Injection_Speed)를 정상 생산 구간 수준으로 하향 검토",
-        "충전시간(Filling_Time)이 충분히 확보되는지 확인",
+    ("가스", "CN7"): [
+        "금형온도 3·4번 확인 — 불량 시 평균 25.1/27.7℃, 정상 22.1/23.5℃로 높았음",
+        "금형온도가 오르는 원인(냉각수 유량, 연속 가동 시간) 점검",
     ],
-    "미성형": [
-        "사출속도/충전시간 조건이 가스 불량과 동일 패턴 → 같은 원인일 가능성 우선 점검",
-        "동일 시간대 설비 이상 여부(로그) 확인",
+    ("가스", "RG3"): [
+        "스크류 평균 회전수 확인 — 불량 시 231, 정상 276으로 낮았음",
+        "가소화가 충분히 이루어지는지 확인",
+    ],
+    ("미성형", "CN7"): [
+        "사출속도 확인 — 불량 시 58.9, 정상 55.6으로 다소 높았음",
+        "금형온도 3·4번도 함께 확인 (가스 불량과 유사한 패턴)",
+    ],
+    ("초기허용불량", "CN7"): [
+        "초기 생산분 특성일 가능성 — 충전시간이 길고 사출속도가 낮음",
+        "정상 조건 도달 전 생산분이므로 별도 관리 대상으로 분류 검토",
     ],
 }
 
 
-def suggest_action(df: pd.DataFrame, reason: str) -> dict:
-    """원인별 조치안 + 우선 점검 대상(PART_NAME별 불량률)을 함께 반환합니다."""
-    actions = ACTION_RULES.get(reason, [])
+def suggest_action(df: pd.DataFrame, reason: str, part_code: str = None) -> dict:
+    """원인별 조치안 + 품번별 불량률을 반환합니다.
 
-    part_rate = df.groupby("PART_NAME")["PassOrFail"].apply(
-        lambda x: round((x == "N").mean() * 100, 2)
+    조치안은 반드시 (원인, 품번) 쌍으로 관리합니다.
+    품번마다 원인이 다르기 때문에, 한 품번에서 얻은 조치를
+    다른 품번에 그대로 적용하면 위험합니다.
+    """
+    part_rate = df.groupby("part_code").apply(
+        lambda g: round((g["PassOrFail"] == "N").mean() * 100, 2)
     ).sort_values(ascending=False)
 
+    if part_code:
+        actions = ACTION_RULES.get((reason, part_code), [])
+        return {
+            "reason": reason,
+            "part_code": part_code,
+            "actions": actions,
+            "has_verified_rule": len(actions) > 0,
+            "part_defect_rate_pct": float(part_rate.get(part_code, 0)),
+        }
+
+    # 품번 지정이 없으면 품번별 조치안을 모두 반환
+    by_part = {
+        code: ACTION_RULES.get((reason, code), [])
+        for code in part_rate.index
+        if ACTION_RULES.get((reason, code))
+    }
     return {
         "reason": reason,
-        "actions": actions,
-        "priority_check_part": part_rate.index[0] if len(part_rate) else None,
-        "part_defect_rate_table": part_rate.reset_index().rename(
-            columns={"PassOrFail": "fail_rate_pct"}
+        "note": "품번마다 원인이 다르므로 조치도 품번별로 다릅니다.",
+        "actions_by_part": by_part,
+        "part_defect_rate_table": part_rate.reset_index(
+            name="fail_rate_pct"
         ).to_dict(orient="records"),
     }
 
@@ -169,8 +266,8 @@ if __name__ == "__main__":
     print("=== STEP1 테스트 ===")
     print(get_worst_day(df))
     print("\n=== STEP2 테스트 ===")
-    print(compare_normal_vs_defect(df, "가스")["top_differences"][:3])
+    print(compare_normal_vs_defect(df, "가스", part_code="CN7")["top_differences"][:3])
     print("\n=== STEP3 테스트 ===")
-    print(suggest_action(df, "가스"))
+    print(suggest_action(df, "가스", part_code="CN7"))
     print("\n=== STEP4 테스트 ===")
     print(check_answerable("day_vs_night"))

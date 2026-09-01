@@ -47,7 +47,8 @@ if user_input:
 
     with st.chat_message("assistant"):
         with st.spinner("데이터 확인 중..."):
-            answer = agent.ask(user_input, df)
+            history = st.session_state.messages[:-1][-6:]
+            answer = agent.ask(user_input, df, history=history)
         st.write(answer)
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
