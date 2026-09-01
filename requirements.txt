@@ -1,3 +1,4 @@
 pandas
 anthropic
 streamlit
+python-dotenv
