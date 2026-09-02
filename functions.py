@@ -73,6 +73,8 @@ def load_data(source=None) -> pd.DataFrame:
     df["date"] = df["TimeStamp"].dt.date
     # 품번 코드(CN7/RG3 등)를 미리 뽑아둡니다. 품번별 비교에 사용합니다.
     df["part_code"] = df["PART_NAME"].str.extract(PART_CODE_PATTERN)
+    # 좌우 구분(LH/RH)도 뽑아둡니다. "LH랑 RH 중 어디가 불량이 많아?"에 답하기 위함입니다.
+    df["side"] = df["PART_NAME"].str.extract(r"\b(LH|RH)\b")
     return df
 
 
@@ -96,11 +98,27 @@ def list_part_codes(df: pd.DataFrame, reason: str = None) -> dict:
             "defect_rate_pct": round(n_defect / total * 100, 2) if total else 0.0,
         })
     rows.sort(key=lambda r: r["defect_rate_pct"], reverse=True)
+
+    # 좌우(LH/RH) 구분이 있으면 그것도 함께 알려줍니다.
+    by_side = []
+    if "side" in df.columns and df["side"].notna().any():
+        for s, g in df.dropna(subset=["side"]).groupby("side"):
+            n_d = (g["Reason"] == reason).sum() if reason else (g["PassOrFail"] == "N").sum()
+            by_side.append({
+                "side": s,
+                "total": len(g),
+                "n_defect": int(n_d),
+                "defect_rate_pct": round(n_d / len(g) * 100, 2) if len(g) else 0.0,
+            })
+        by_side.sort(key=lambda r: r["defect_rate_pct"], reverse=True)
+
     return {
         "reason": reason,
         "parts": rows,
+        "by_side": by_side,
         "note": ("defect_rate_pct(불량률) 기준으로 정렬했습니다. n_defect(건수)만 보고 "
-                 "우선순위를 판단하지 마세요 — 생산량이 많은 품번은 건수만 많아 보일 수 있습니다."),
+                 "우선순위를 판단하지 마세요 — 생산량이 많은 품번은 건수만 많아 보일 수 있습니다. "
+                 "by_side는 같은 품번의 좌우(LH/RH) 구분입니다."),
     }
 
 
@@ -609,9 +627,21 @@ def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
         return {"error": f"'{variable}'에 해당하는 값을 찾을 수 없습니다.",
                 "available": list(VARIABLE_ALIASES.keys())}
 
+    # 품번을 지정하지 않았다고 사용자에게 되묻지 않습니다.
+    # 분석할 만한 품번(불량이 있는 품번)을 스스로 골라 전부 계산해서 돌려줍니다.
     if not part_code:
-        return {"error": "품번을 지정해야 합니다. 품번마다 설정값이 달라 뭉쳐서 보면 안 됩니다.",
-                "hint": "part_code에 'CN7' 또는 'RG3'을 넣어주세요."}
+        targets = [c for c in df["part_code"].dropna().unique()
+                   if (df[df["part_code"] == c]["PassOrFail"] == "N").sum() >= MIN_DEFECT_SAMPLES]
+        if not targets:
+            return {"variable": variable, "error": "불량 표본이 충분한 품번이 없습니다."}
+        return {
+            "variable": variable,
+            "reason": reason,
+            "note": ("품번을 지정하지 않아 불량이 있는 품번을 모두 계산했습니다. "
+                     "품번마다 결과가 다를 수 있으니 답변에 품번을 반드시 밝히세요."),
+            "by_part": {c: check_variable(df, variable, reason, part_code=c)
+                        for c in targets},
+        }
 
     mode_info = detect_operating_modes(df, part_code)
 
