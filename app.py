@@ -16,10 +16,20 @@ st.title("🏭 ShopFloor Copilot")
 st.caption("현장에서 쓰는 말로 물어보세요. 공정 데이터를 근거로 답합니다.")
 
 @st.cache_data
-def get_data():
-    return f.load_data()
+def get_data(source=None):
+    return f.load_data(source)
 
-df = get_data()
+uploaded_file = st.sidebar.file_uploader("공정 데이터 업로드 (CSV)", type="csv")
+
+if uploaded_file is not None:
+    df_up = pd.read_csv(uploaded_file)
+    missing = f.validate_columns(df_up)
+    if missing:
+        st.error(f"필요한 컬럼이 없습니다: {', '.join(missing[:5])}")
+        st.stop()
+    df = get_data(uploaded_file)
+else:
+    df = get_data()
 
 @st.cache_data
 def get_daily_defect_rate(data):
