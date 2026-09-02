@@ -2,3 +2,4 @@ pandas
 anthropic
 streamlit
 python-dotenv
+plotly
