@@ -103,8 +103,11 @@ TOOLS = [
     {
         "name": "list_part_codes",
         "description": (
-            "분석 가능한 품번 목록과 품번별 불량 건수를 알려준다. "
-            "어떤 품번을 봐야 할지 판단할 때 먼저 호출한다."
+            "분석 가능한 품번 목록과 품번별 불량 건수·불량률을 알려준다. "
+            "'불량 줄이려면 뭘 먼저 봐야 해?', '어떤 품번을 봐야 할지' 판단할 때 먼저 호출한다. "
+            "결과는 defect_rate_pct(불량률) 기준으로 정렬되어 있다. "
+            "n_defect(건수)만 보고 우선순위를 말하지 마라 — 생산량이 많은 품번은 "
+            "불량률이 낮아도 건수만 많아 보일 수 있다. 반드시 defect_rate_pct 기준으로 답하라."
         ),
         "input_schema": {
             "type": "object",
@@ -149,7 +152,10 @@ TOOLS = [
             "'지금 배럴온도 설정 괜찮아?'처럼 값을 지정한 질문에는 "
             "compare_normal_vs_defect 대신 반드시 이 도구를 사용한다. "
             "(compare_normal_vs_defect는 상위 몇 개만 돌려주므로, 지정한 값이 "
-            "목록에 없으면 답할 수 없다.) part_code는 필수다."
+            "목록에 없으면 답할 수 없다.) part_code는 필수다. "
+            "해당 품번에 운전 조건(저속/고속)이 있는데 mode를 지정하지 않으면 "
+            "자동으로 저속/고속을 나눠 by_mode로 돌려준다 — 이때 두 조건의 "
+            "결과가 다를 수 있으므로 반드시 조건별로 나누어 답하라."
         ),
         "input_schema": {
             "type": "object",
@@ -234,6 +240,11 @@ SYSTEM_PROMPT = """\
 [값을 지정한 질문]
 - "금형온도가 관계있어?"처럼 특정 값을 지목한 질문에는 반드시 check_variable을 쓰세요.
   compare_normal_vs_defect는 상위 몇 개만 돌려주므로 그 값이 없을 수 있습니다.
+- "몇 도 이상/이하면 위험해요?"처럼 구체적인 임계값(숫자 하나)을 묻는 질문에는,
+  check_variable 결과의 normal_range와 defect_range를 함께 확인하세요.
+  ranges_overlap이 true이면 두 범위가 겹친다는 뜻이므로, "OO도 이상이면 위험"처럼
+  단정적인 숫자를 만들어내지 마세요. 대신 "평균적으로 정상보다 높게/낮게 나타나는
+  경향이 있습니다" 정도로 답하고, 정상군도 그 값까지 나온 적이 있다는 사실을 함께 밝히세요.
 
 [답변 길이]
 - 핵심 3가지 이내로 간결하게 쓰세요. 이모지는 쓰지 않습니다.
@@ -268,7 +279,14 @@ FUNCTION_MAP = {
 
 def ask(question: str, df, history=None) -> str:
     """사용자 질문 하나를 받아 최종 답변 문자열을 반환합니다."""
-    messages = (history or []) + [{"role": "user", "content": question}]
+    # history는 app.py의 st.session_state.messages에서 그대로 넘어옵니다.
+    # app.py가 화면 표시용으로 role/content 외의 필드(예: show_chart 같은 UI 상태값)를
+    # 같이 저장해도, Claude API는 role/content 외의 필드를 절대 허용하지 않습니다.
+    # 여기서 role/content만 남기고 나머지는 걸러내야 API 호출이 깨지지 않습니다.
+    clean_history = [
+        {"role": h["role"], "content": h["content"]} for h in (history or [])
+    ]
+    messages = clean_history + [{"role": "user", "content": question}]
 
     response = client.messages.create(
         model=MODEL,
