@@ -36,13 +36,25 @@ SENSOR_COLS = [
 # 예: "CN7 W/S SIDE MLD'G RH" -> "CN7"
 PART_CODE_PATTERN = r"^(CN7|RG3|SP2|JX1)"
 
+# 업로드된 데이터가 이 앱에서 쓰일 수 있으려면 반드시 있어야 하는 컬럼들
+REQUIRED_COLUMNS = ["TimeStamp", "PassOrFail", "Reason", "PART_NAME"] + SENSOR_COLS
 
-def load_data() -> pd.DataFrame:
+
+def validate_columns(df: pd.DataFrame) -> list:
+    """업로드된 데이터에 우리 앱이 꼭 필요로 하는 컬럼이 다 있는지 확인합니다.
+    빠진 컬럼 목록을 돌려줍니다. 빈 리스트면 문제없다는 뜻입니다.
+    """
+    return [c for c in REQUIRED_COLUMNS if c not in df.columns]
+
+
+def load_data(source=None) -> pd.DataFrame:
     """CSV를 불러와서 날짜 타입 등을 정리합니다.
+    source가 없으면 기본 데이터(labeled_data.csv)를 불러오고,
+    source에 파일이 들어오면(업로드된 파일 등) 그걸 대신 불러옵니다.
     앱이 켜질 때 한 번만 불러오고 메모리에 캐싱해서 재사용하세요.
     (매 질문마다 다시 읽으면 느려집니다)
     """
-    df = pd.read_csv(DATA_PATH)
+    df = pd.read_csv(source if source is not None else DATA_PATH)
     df["TimeStamp"] = pd.to_datetime(df["TimeStamp"])
     df["date"] = df["TimeStamp"].dt.date
     # 품번 코드(CN7/RG3 등)를 미리 뽑아둡니다. 품번별 비교에 사용합니다.
@@ -81,9 +93,24 @@ def list_part_codes(df: pd.DataFrame, reason: str = None) -> dict:
 # ---------------------------------------------------------------------
 # STEP 1. 현황 파악 — "이번 주에 불량 유독 많았던 날 있었어요?"
 # ---------------------------------------------------------------------
-def get_worst_day(df: pd.DataFrame, top_n: int = 5) -> dict:
-    """날짜별 불량률을 계산해서 가장 안 좋았던 날을 찾습니다."""
-    daily = df.groupby("date")["PassOrFail"].agg(
+def get_worst_day(df: pd.DataFrame, days: int = None, top_n: int = 5) -> dict:
+    """날짜별 불량률을 계산해서 가장 안 좋았던 날을 찾습니다.
+
+    days를 주면 데이터의 마지막 날을 '오늘'로 보고 최근 N일만 봅니다.
+    "이번 주"는 days=7, "최근 2주"는 days=14로 해석하면 됩니다.
+    days를 생략하면 전체 기간을 봅니다.
+    """
+    reference_date = df["date"].max()   # 이 데이터에서의 '오늘'
+    scope = df
+
+    if days:
+        cutoff = pd.Timestamp(reference_date) - pd.Timedelta(days=days - 1)
+        scope = df[df["date"] >= cutoff.date()]
+        if len(scope) == 0:
+            return {"error": f"최근 {days}일 안에 생산 기록이 없습니다.",
+                    "reference_date": str(reference_date)}
+
+    daily = scope.groupby("date")["PassOrFail"].agg(
         total="count",
         fail=lambda x: (x == "N").sum(),
     )
@@ -108,12 +135,17 @@ def get_worst_day(df: pd.DataFrame, top_n: int = 5) -> dict:
             context.append(entry)
 
     return {
+        "reference_date": str(reference_date),
+        "period": (f"최근 {days}일 ({scope['date'].min()} ~ {reference_date})"
+                   if days else f"전체 기간 ({df['date'].min()} ~ {reference_date})"),
+        "days_with_production": int(scope["date"].nunique()),
         "worst_date": worst_date,
         "worst_fail_rate_pct": float(top.iloc[0]["fail_rate_pct"]) if len(top) else None,
         "worst_day_production": context,
-        "hint": ("불량률이 높은 날은 특정 품번이나 운전 조건만 돌린 날일 수 있습니다. "
-                 "worst_day_production을 확인하고, 필요하면 get_operating_modes로 "
-                 "그 조건의 불량률을 비교하세요."),
+        "hint": ("이 데이터의 마지막 생산일은 " + str(reference_date) + "입니다. "
+                 "'오늘'이나 '이번 주'는 이 날짜를 기준으로 해석하며, 답변할 때 "
+                 "기준일을 함께 밝히세요. 불량률이 높은 날은 특정 품번이나 운전 조건만 "
+                 "돌린 날일 수 있으니 worst_day_production을 확인하세요."),
         "table": top.to_dict(orient="records"),
     }
 
@@ -465,32 +497,13 @@ VARIABLE_ALIASES = {
 }
 
 
-def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
-                   part_code: str = None, mode: str = None) -> dict:
-    """특정 변수 하나가 불량과 관계있는지만 콕 집어 확인합니다.
-    compare_normal_vs_defect는 상위 몇 개만 돌려주기 때문에,
-    "금형온도가 관계있어요?"처럼 변수를 지정한 질문에는 이 함수를 씁니다.
-    """
-    cols = VARIABLE_ALIASES.get(variable.replace(" ", ""))
-    if not cols:
-        cols = [c for c in SENSOR_COLS if c.lower() == variable.lower()]
-    if not cols:
-        return {"error": f"'{variable}'에 해당하는 값을 찾을 수 없습니다.",
-                "available": list(VARIABLE_ALIASES.keys())}
-
-    if part_code:
-        sub, _ = _apply_mode(df, part_code, mode) if mode else (
-            df[df["part_code"] == part_code], None)
-    else:
-        return {"error": "품번을 지정해야 합니다. 품번마다 설정값이 달라 뭉쳐서 보면 안 됩니다.",
-                "hint": "part_code에 'CN7' 또는 'RG3'을 넣어주세요."}
-
+def _check_variable_within(sub: pd.DataFrame, cols: list, reason: str = None) -> dict:
+    """하나의 품번·하나의 운전 조건 안에서만 특정 변수를 비교하는 내부 함수."""
     normal = sub[sub["PassOrFail"] == "Y"]
     target = sub[sub["Reason"] == reason] if reason else sub[sub["PassOrFail"] == "N"]
 
     if len(target) < MIN_DEFECT_SAMPLES:
-        return {"variable": variable, "part_code": part_code, "mode": mode,
-                "n_defect": len(target), "skipped": True,
+        return {"n_defect": len(target), "skipped": True,
                 "note": f"불량 표본이 {len(target)}건뿐이라 비교할 수 없습니다."}
 
     results = []
@@ -499,25 +512,43 @@ def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
         if not sd or sd <= 0:
             results.append({"column": c, "note": "정상군에서 값이 변하지 않아 비교 불가"})
             continue
+
         pct = abs(t - m) / abs(m) * 100 if m else 0.0
         z = float((t - m) / sd)
+
+        # 불량군의 실제 관측 범위와 정상군의 범위를 함께 줍니다.
+        # "몇 도 이상이면 위험해요?" 같은 질문에 평균만으로 답하면
+        # 정상군과 범위가 겹치는 경우를 놓칠 수 있습니다.
+        # (예: 정상군도 최대 27.8도까지 나온 적이 있는데, 불량군 평균이 27.65도라고
+        #  "27.5도 이상이면 위험"이라 말하면 틀린 확답이 됩니다.)
+        n_min, n_max = float(normal[c].min()), float(normal[c].max())
+        t_min, t_max = float(target[c].min()), float(target[c].max())
+        overlap = not (t_max < n_min or t_min > n_max)
+
         results.append({
             "column": c,
             "normal_mean": round(float(m), 2),
+            "normal_range": [round(n_min, 2), round(n_max, 2)],
             "defect_mean": round(float(t), 2),
+            "defect_range": [round(t_min, 2), round(t_max, 2)],
             "pct_diff": round(pct, 1),
             "z_score": round(z, 2),
             "meaningful": bool(pct >= MIN_PCT_DIFF and abs(z) >= MIN_ABS_Z),
+            "ranges_overlap": overlap,
+            "overlap_note": (
+                "정상군과 불량군의 관측 범위가 겹칩니다. 특정 숫자를 '이 값 이상이면 "
+                "위험'이라고 단정하지 말고, 평균이 높은/낮은 쪽으로 치우친 경향만 말하세요."
+                if overlap else
+                "정상군과 불량군의 관측 범위가 겹치지 않습니다. 관측된 defect_range를 "
+                "참고 삼아 경계값을 제시할 수 있지만, 표본이 적으면 확정적으로 말하지 마세요."
+            ),
         })
 
     any_meaningful = any(r.get("meaningful") for r in results)
     return {
-        "variable": variable,
-        "reason": reason,
-        "part_code": part_code,
-        "mode": mode,
         "n_defect": len(target),
         "n_normal": len(normal),
+        "skipped": False,
         "low_sample_warning": len(target) < LOW_SAMPLE_LIMIT,
         "related": any_meaningful,
         "conclusion": ("불량군과 뚜렷한 차이가 있습니다." if any_meaningful
@@ -525,6 +556,56 @@ def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
                             "이 값은 원인으로 보기 어렵습니다."),
         "details": results,
     }
+
+
+def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
+                   part_code: str = None, mode: str = None) -> dict:
+    """특정 변수 하나가 불량과 관계있는지만 콕 집어 확인합니다.
+    compare_normal_vs_defect는 상위 몇 개만 돌려주기 때문에,
+    "금형온도가 관계있어요?"처럼 변수를 지정한 질문에는 이 함수를 씁니다.
+
+    주의: 운전 조건이 있는 품번에서 mode를 지정하지 않으면 두 조건이 섞여
+    결론이 왜곡될 수 있습니다. 그래서 조건이 있으면 자동으로 나누어 계산합니다.
+    """
+    cols = VARIABLE_ALIASES.get(variable.replace(" ", ""))
+    if not cols:
+        cols = [c for c in SENSOR_COLS if c.lower() == variable.lower()]
+    if not cols:
+        return {"error": f"'{variable}'에 해당하는 값을 찾을 수 없습니다.",
+                "available": list(VARIABLE_ALIASES.keys())}
+
+    if not part_code:
+        return {"error": "품번을 지정해야 합니다. 품번마다 설정값이 달라 뭉쳐서 보면 안 됩니다.",
+                "hint": "part_code에 'CN7' 또는 'RG3'을 넣어주세요."}
+
+    mode_info = detect_operating_modes(df, part_code)
+
+    if mode_info.get("has_modes") and not mode:
+        by_mode = {}
+        for m in ("저속", "고속"):
+            sub, _ = _apply_mode(df, part_code, m)
+            by_mode[m] = _check_variable_within(sub, cols, reason)
+        return {
+            "variable": variable,
+            "reason": reason,
+            "part_code": part_code,
+            "operating_modes": mode_info,
+            "note": (mode_info["note"] + " 그래서 저속/고속을 섞지 않고 나누어 "
+                     "계산했습니다. 두 조건의 결과가 다를 수 있으니 반드시 "
+                     "조건을 밝혀서 답하세요."),
+            "by_mode": by_mode,
+        }
+
+    sub, _ = _apply_mode(df, part_code, mode) if mode else (
+        df[df["part_code"] == part_code], None)
+    result = _check_variable_within(sub, cols, reason)
+    result.update({
+        "variable": variable,
+        "reason": reason,
+        "part_code": part_code,
+        "mode": mode,
+    })
+    return result
 
 
 ACTION_RULES = {
