@@ -51,19 +51,31 @@ def load_data() -> pd.DataFrame:
 
 
 def list_part_codes(df: pd.DataFrame, reason: str = None) -> dict:
-    """분석에 쓸 수 있는 품번 목록과 각 품번의 불량 건수를 알려줍니다.
+    """분석에 쓸 수 있는 품번 목록과 각 품번의 불량 건수·불량률을 알려줍니다.
     agent가 '어떤 품번으로 비교할지' 정할 때 참고합니다.
     """
     rows = []
     for code, g in df.groupby("part_code"):
         n_defect = (g["Reason"] == reason).sum() if reason else (g["PassOrFail"] == "N").sum()
+        total = len(g)
         rows.append({
             "part_code": code,
-            "total": len(g),
+            "total": total,
             "n_defect": int(n_defect),
+            # 건수만 보면 생산량이 많은 품번이 항상 1위로 보입니다.
+            # (예: CN7은 불량 39건, RG3는 32건이지만, 불량률은 RG3가 2.55%로
+            #  CN7 0.58%보다 4배 이상 높습니다. 생산량이 6,736 vs 1,256이라
+            #  건수만 비교하면 반대로 읽힙니다.)
+            # 그래서 "먼저 봐야 할 품번"은 건수가 아니라 불량률로 정렬합니다.
+            "defect_rate_pct": round(n_defect / total * 100, 2) if total else 0.0,
         })
-    rows.sort(key=lambda r: r["n_defect"], reverse=True)
-    return {"reason": reason, "parts": rows}
+    rows.sort(key=lambda r: r["defect_rate_pct"], reverse=True)
+    return {
+        "reason": reason,
+        "parts": rows,
+        "note": ("defect_rate_pct(불량률) 기준으로 정렬했습니다. n_defect(건수)만 보고 "
+                 "우선순위를 판단하지 마세요 — 생산량이 많은 품번은 건수만 많아 보일 수 있습니다."),
+    }
 
 
 # ---------------------------------------------------------------------
@@ -112,6 +124,7 @@ def get_worst_day(df: pd.DataFrame, top_n: int = 5) -> dict:
 MIN_DEFECT_SAMPLES = 5   # 이보다 적으면 비교 자체를 하지 않습니다
 LOW_SAMPLE_LIMIT = 30    # 이보다 적으면 "확정"이 아니라 "우선 확인 대상"으로 말합니다
 MIN_PCT_DIFF = 2.0       # 정상값 대비 이보다 작게 차이나면 현장에서 의미 없다고 봅니다
+MIN_ABS_Z = 0.5          # 표준편차 대비 이보다 작게 움직였으면 차이로 보지 않습니다
 
 
 # ---------------------------------------------------------------------
@@ -237,11 +250,16 @@ def _compare_within(sub: pd.DataFrame, reason: str, top_n: int) -> dict:
         if not n_std or n_std <= 0:
             continue  # 정상군 안에서 값이 전혀 변하지 않는 컬럼은 비교 의미가 없음
 
-        # 정상값 대비 몇 % 차이나는지. 표준편차가 아주 작으면 z_score가
-        # 크게 나오지만 실제 차이는 0.01처럼 무의미한 경우가 있어서 함께 봅니다.
-        # (예: 체결시간 7.13 vs 7.12는 z=2.08이지만 현장에서는 같은 값입니다.)
+        # 두 가지를 모두 만족해야 "차이가 있다"고 봅니다.
+        #  - pct_diff: 정상값 대비 몇 % 차이나는가 (현장에서 체감되는 크기)
+        #  - z_score : 정상군이 평소 흔들리는 폭에 비해 얼마나 벗어났는가
+        # 둘 중 하나만 보면 속습니다.
+        #  예1) 체결시간 7.13 vs 7.12는 z=2.08이지만 실제 차이가 0.01이라 무의미
+        #  예2) 전환위치는 정상의 99.7%가 0인데 이상치 4건 때문에 평균이 2.27이 되어
+        #       "100% 차이"로 보이지만, z=-0.06으로 사실상 차이가 없음
         pct = abs(t_mean - n_mean) / abs(n_mean) * 100 if n_mean else 0.0
-        if pct < MIN_PCT_DIFF:
+        z = (t_mean - n_mean) / n_std
+        if pct < MIN_PCT_DIFF or abs(z) < MIN_ABS_Z:
             continue
 
         rows.append({
@@ -249,7 +267,7 @@ def _compare_within(sub: pd.DataFrame, reason: str, top_n: int) -> dict:
             "normal_mean": round(n_mean, 2),
             "defect_mean": round(t_mean, 2),
             "pct_diff": round(pct, 1),
-            "z_score": round((t_mean - n_mean) / n_std, 2),
+            "z_score": round(z, 2),
         })
 
     rows.sort(key=lambda r: abs(r["z_score"]), reverse=True)
@@ -400,12 +418,13 @@ def get_recent_defects(df: pd.DataFrame, n: int = 5) -> dict:
                 if not sd or sd <= 0 or not m:
                     continue
                 pct = abs(row[c] - m) / abs(m) * 100
-                if pct < MIN_PCT_DIFF:
+                z = float((row[c] - m) / sd)
+                if pct < MIN_PCT_DIFF or abs(z) < MIN_ABS_Z:
                     continue
                 outliers.append({"variable": c, "value": round(float(row[c]), 2),
                                  "normal_mean": round(float(m), 2),
                                  "pct_diff": round(pct, 1),
-                                 "z_score": round(float((row[c] - m) / sd), 2)})
+                                 "z_score": round(z, 2)})
             outliers.sort(key=lambda r: abs(r["z_score"]), reverse=True)
 
         items.append({
@@ -481,13 +500,14 @@ def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
             results.append({"column": c, "note": "정상군에서 값이 변하지 않아 비교 불가"})
             continue
         pct = abs(t - m) / abs(m) * 100 if m else 0.0
+        z = float((t - m) / sd)
         results.append({
             "column": c,
             "normal_mean": round(float(m), 2),
             "defect_mean": round(float(t), 2),
             "pct_diff": round(pct, 1),
-            "z_score": round(float((t - m) / sd), 2),
-            "meaningful": bool(pct >= MIN_PCT_DIFF),
+            "z_score": round(z, 2),
+            "meaningful": bool(pct >= MIN_PCT_DIFF and abs(z) >= MIN_ABS_Z),
         })
 
     any_meaningful = any(r.get("meaningful") for r in results)
