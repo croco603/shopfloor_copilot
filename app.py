@@ -74,6 +74,7 @@ def make_defect_chart(daily):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# 예시 질문 버튼 (데모 시나리오 STEP1~4)
 st.write("**예시 질문:**")
 col1, col2, col3, col4 = st.columns(4)
 example_clicked = None
@@ -85,7 +86,16 @@ if col2.button("가스 불량 원인은?"):
 if col3.button("뭘 조정해야 해?"):
     example_clicked = "그럼 뭘 조정해야 해요?"
 if col4.button("야간에 불량이 왜 많아요?"):
+    # STEP4 신뢰성 시연용 질문 — 데이터로 답할 수 없는 질문임을
+    # 솔직하게 인정하는 모습을 보여주기 위한 버튼입니다.
     example_clicked = "야간에 불량이 왜 더 많아요?"
+
+# 둘째 줄 — 미성형/RG3는 검증된 조치안이 없는 조합이라, '모른다'를 정직하게
+# 인정하는 모습을 STEP4(야간 질문)와는 다른 맥락(조치 제안)에서 한 번 더
+# 보여줄 수 있는 버튼입니다. part_code를 문장에 직접 넣어 RG3로 확실히 유도합니다.
+col5, = st.columns(1)
+if col5.button("미성형은 RG3에서 어떻게 막아요?"):
+    example_clicked = "미성형은 RG3에서 어떻게 막아야 해요?"
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
