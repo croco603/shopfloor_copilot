@@ -36,25 +36,39 @@ SENSOR_COLS = [
 # 예: "CN7 W/S SIDE MLD'G RH" -> "CN7"
 PART_CODE_PATTERN = r"^(CN7|RG3|SP2|JX1)"
 
-# 업로드된 데이터가 이 앱에서 쓰일 수 있으려면 반드시 있어야 하는 컬럼들
-REQUIRED_COLUMNS = ["TimeStamp", "PassOrFail", "Reason", "PART_NAME"] + SENSOR_COLS
+# 업로드된 파일에 반드시 있어야 하는 컬럼들.
+# 이 중 하나라도 없으면 이후 분석 함수들이 KeyError로 앱을 죽입니다.
+REQUIRED_COLUMNS = ["TimeStamp", "PassOrFail", "PART_NAME", "Reason"] + SENSOR_COLS
 
 
 def validate_columns(df: pd.DataFrame) -> list:
-    """업로드된 데이터에 우리 앱이 꼭 필요로 하는 컬럼이 다 있는지 확인합니다.
-    빠진 컬럼 목록을 돌려줍니다. 빈 리스트면 문제없다는 뜻입니다.
+    """업로드된 데이터프레임에 분석에 필요한 컬럼이 다 있는지 확인합니다.
+    없는 컬럼 이름 리스트를 돌려줍니다. (빈 리스트면 전부 있다는 뜻)
+    load_data()로 넘기기 전에 반드시 이 함수로 먼저 확인하세요.
     """
     return [c for c in REQUIRED_COLUMNS if c not in df.columns]
 
 
 def load_data(source=None) -> pd.DataFrame:
     """CSV를 불러와서 날짜 타입 등을 정리합니다.
-    source가 없으면 기본 데이터(labeled_data.csv)를 불러오고,
-    source에 파일이 들어오면(업로드된 파일 등) 그걸 대신 불러옵니다.
+
+    source가 없으면 기본 데이터 파일(DATA_PATH)을 읽습니다.
+    source에 파일 경로나 업로드된 파일 객체(UploadedFile)를 넘기면 그걸 읽습니다.
     앱이 켜질 때 한 번만 불러오고 메모리에 캐싱해서 재사용하세요.
     (매 질문마다 다시 읽으면 느려집니다)
     """
-    df = pd.read_csv(source if source is not None else DATA_PATH)
+    if source is None:
+        source = DATA_PATH
+    elif hasattr(source, "seek"):
+        # 업로드 파일은 validate_columns에서 이미 한 번 읽혔을 수 있으므로
+        # 스트림 위치를 처음으로 되돌려야 다시 읽을 수 있습니다.
+        source.seek(0)
+
+    df = pd.read_csv(source)
+    missing = validate_columns(df)
+    if missing:
+        raise ValueError(f"필요한 컬럼이 없습니다: {', '.join(missing[:5])}")
+
     df["TimeStamp"] = pd.to_datetime(df["TimeStamp"])
     df["date"] = df["TimeStamp"].dt.date
     # 품번 코드(CN7/RG3 등)를 미리 뽑아둡니다. 품번별 비교에 사용합니다.
@@ -324,6 +338,25 @@ def _compare_within(sub: pd.DataFrame, reason: str, top_n: int) -> dict:
     }
 
 
+def _compare_part(df: pd.DataFrame, part_code: str, reason: str, top_n: int) -> dict:
+    """한 품번을 비교합니다. 그 품번에 운전 조건이 갈리면 조건별로 나눕니다.
+    (조건을 나누지 않으면 존재하지 않는 평균과 비교하게 됩니다.)
+    """
+    info = detect_operating_modes(df, part_code)
+    if not info.get("has_modes"):
+        return _compare_within(df[df["part_code"] == part_code], reason, top_n)
+
+    by_mode = {}
+    for m in ("저속", "고속"):
+        sub, _ = _apply_mode(df, part_code, m)
+        by_mode[m] = _compare_within(sub, reason, top_n)
+    return {
+        "operating_modes": info,
+        "note": info["note"],
+        "by_mode": by_mode,
+    }
+
+
 def compare_normal_vs_defect(df: pd.DataFrame, reason: str, part_code: str = None,
                              mode: str = None, top_n: int = 5) -> dict:
     """특정 불량 원인(reason) 그룹과 정상 그룹의 센서값을 비교합니다.
@@ -343,14 +376,16 @@ def compare_normal_vs_defect(df: pd.DataFrame, reason: str, part_code: str = Non
         return {"error": f"'{reason}' 원인에 해당하는 데이터가 없습니다.", "n_defect": 0}
 
     # 품번 지정이 없으면 품번별로 나눠서 전부 비교
+    # (각 품번 안에 운전 조건이 갈리면 그것까지 나눕니다)
     if not part_code:
         return {
             "reason": reason,
             "compared_within_part": True,
             "note": ("품번마다 금형과 설정값이 달라 원인도 다를 수 있으므로 "
-                     "품번별로 나누어 비교한 결과입니다. 품번을 뭉쳐서 비교하면 안 됩니다."),
-            "by_part": {code: _compare_within(g, reason, top_n)
-                        for code, g in df.groupby("part_code")},
+                     "품번별로 나누어 비교한 결과입니다. 품번을 뭉쳐서 비교하면 안 됩니다. "
+                     "운전 조건이 갈리는 품번은 조건별로도 나누었습니다."),
+            "by_part": {code: _compare_part(df, code, reason, top_n)
+                        for code in df["part_code"].dropna().unique()},
         }
 
     if part_code not in df["part_code"].dropna().unique():
