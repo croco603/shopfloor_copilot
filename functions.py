@@ -531,6 +531,7 @@ def get_recent_defects(df: pd.DataFrame, n: int = 5) -> dict:
 # 특정 변수 확인 — "금형온도가 불량이랑 관계있어요?"
 # ---------------------------------------------------------------------
 # 현장에서 쓰는 말 -> 실제 컬럼 이름
+# 한국어와 영어를 모두 받습니다. 심사위원이 영어로 물어볼 수 있기 때문입니다.
 VARIABLE_ALIASES = {
     "사출속도": ["Max_Injection_Speed"],
     "사출시간": ["Injection_Time"],
@@ -547,7 +548,37 @@ VARIABLE_ALIASES = {
     "가소화시간": ["Plasticizing_Time"],
     "쿠션위치": ["Cushion_Position"],
     "형체시간": ["Clamp_Close_Time"],
+
+    # 영어 표현
+    "injectionspeed": ["Max_Injection_Speed"],
+    "injectiontime": ["Injection_Time"],
+    "fillingtime": ["Filling_Time"],
+    "injectionpressure": ["Max_Injection_Pressure"],
+    "holdingpressure": ["Max_Switch_Over_Pressure"],
+    "backpressure": ["Max_Back_Pressure", "Average_Back_Pressure"],
+    "moldtemperature": ["Mold_Temperature_1", "Mold_Temperature_2",
+                        "Mold_Temperature_3", "Mold_Temperature_4"],
+    "moldtemp": ["Mold_Temperature_1", "Mold_Temperature_2",
+                 "Mold_Temperature_3", "Mold_Temperature_4"],
+    "barreltemperature": [f"Barrel_Temperature_{i}" for i in range(1, 8)],
+    "barreltemp": [f"Barrel_Temperature_{i}" for i in range(1, 8)],
+    "hoppertemperature": ["Hopper_Temperature"],
+    "screwrpm": ["Max_Screw_RPM", "Average_Screw_RPM"],
+    "screwspeed": ["Max_Screw_RPM", "Average_Screw_RPM"],
+    "cycletime": ["Cycle_Time"],
+    "plasticizingtime": ["Plasticizing_Time"],
+    "cushionposition": ["Cushion_Position"],
+    "clampclosetime": ["Clamp_Close_Time"],
 }
+
+
+def _normalize_variable(name: str) -> str:
+    """'Mold Temperature', 'mold_temp', '금형 온도'를 모두 같은 키로 맞춥니다."""
+    return name.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+
+# 조회를 빠르게 하기 위해 정규화된 키로 미리 만들어 둡니다.
+_ALIAS_LOOKUP = {_normalize_variable(k): v for k, v in VARIABLE_ALIASES.items()}
 
 
 def _check_variable_within(sub: pd.DataFrame, cols: list, reason: str = None) -> dict:
@@ -620,9 +651,10 @@ def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
     주의: 운전 조건이 있는 품번에서 mode를 지정하지 않으면 두 조건이 섞여
     결론이 왜곡될 수 있습니다. 그래서 조건이 있으면 자동으로 나누어 계산합니다.
     """
-    cols = VARIABLE_ALIASES.get(variable.replace(" ", ""))
+    cols = _ALIAS_LOOKUP.get(_normalize_variable(variable))
     if not cols:
-        cols = [c for c in SENSOR_COLS if c.lower() == variable.lower()]
+        cols = [c for c in SENSOR_COLS
+                if _normalize_variable(c) == _normalize_variable(variable)]
     if not cols:
         return {"error": f"'{variable}'에 해당하는 값을 찾을 수 없습니다.",
                 "available": list(VARIABLE_ALIASES.keys())}
