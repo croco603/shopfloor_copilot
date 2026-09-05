@@ -282,7 +282,7 @@ daily_rate = get_daily_defect_rate(df)
 # ---------------------------------------------------------------------
 # 대시보드 — 핵심 지표 (KPI)
 # ---------------------------------------------------------------------
-def render_kpi_row(data, T):
+def render_kpi_row(data, T, key_prefix="kpi"):
     total = len(data)
     n_fail = int((data["PassOrFail"] == "N").sum())
     fail_rate = round(n_fail / total * 100, 2) if total else 0.0
@@ -302,24 +302,30 @@ def render_kpi_row(data, T):
          f"{top_part['defect_rate_pct']}%" if top_part else None),
     ]
     # 카드마다 테두리를 둘러서 배경 위에 붕 떠 보이지 않고 하나의 패널처럼 보이게 합니다.
-    for col, (label, value, delta) in zip(st.columns(4, gap="medium"), kpis):
+    # key에 key_prefix + 인덱스를 넣어서, 같은 값의 KPI가 여러 메시지에 걸쳐
+    # 반복돼도 StreamlitDuplicateElementId 에러가 나지 않게 합니다.
+    for i, (col, (label, value, delta)) in enumerate(zip(st.columns(4, gap="medium"), kpis)):
         with col, st.container(border=True):
-            st.metric(label, value, delta, delta_color="off")
+            st.metric(label, value, delta, delta_color="off", key=f"{key_prefix}_{i}")
 
 
-def render_chart_card(fig):
-    """차트 하나를 테두리 있는 카드 안에 넣어서 그립니다. (배경에 붕 떠 보이는 것 방지)"""
+def render_chart_card(fig, key=None):
+    """차트 하나를 테두리 있는 카드 안에 넣어서 그립니다. (배경에 붕 떠 보이는 것 방지)
+
+    key: 같은 figure가 여러 메시지에 걸쳐 반복돼도 Streamlit이 서로 다른
+         요소로 인식하도록 하는 고유값입니다. (StreamlitDuplicateElementId 방지)
+    """
     with st.container(border=True):
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=key)
 
 
-def render_chart_row(figs):
+def render_chart_row(figs, key_prefix="row"):
     figs = [fig for fig in figs if fig is not None]
     if not figs:
         return
-    for col, fig in zip(st.columns(len(figs), gap="medium"), figs):
+    for i, (col, fig) in enumerate(zip(st.columns(len(figs), gap="medium"), figs)):
         with col:
-            render_chart_card(fig)
+            render_chart_card(fig, key=f"{key_prefix}_{i}")
 
 
 # ---------------------------------------------------------------------
@@ -589,18 +595,25 @@ def decide_charts(tools_used, data):
     return spec
 
 
-def render_answer_charts(spec, data, T):
-    """decide_charts가 만든 정보를 실제 차트로 그립니다."""
+def render_answer_charts(spec, data, T, key_prefix="chart"):
+    """decide_charts가 만든 정보를 실제 차트로 그립니다.
+
+    key_prefix: 이 답변(메시지)을 구분하는 고유값입니다. 채팅 기록이 쌓이면서
+                같은 종류/같은 값의 차트가 여러 번 그려져도 서로 다른 요소로
+                인식되도록, 호출하는 쪽(메시지 인덱스 등)에서 매번 다르게 넘겨줍니다.
+    """
     if not spec:
         return
 
     if spec[0].get("kind") == "overview":
-        render_kpi_row(data, T)
+        render_kpi_row(data, T, key_prefix=f"{key_prefix}_kpi")
         daily = get_daily_defect_rate(data)
-        render_chart_row([make_production_fig(daily, T), make_defect_rate_fig(daily, T)])
+        render_chart_row([make_production_fig(daily, T), make_defect_rate_fig(daily, T)],
+                          key_prefix=f"{key_prefix}_trend")
         render_chart_row([make_reason_fig(data, T),
                           make_part_fig(data, T),
-                          make_side_fig(data, T)])
+                          make_side_fig(data, T)],
+                          key_prefix=f"{key_prefix}_row")
         return
 
     figs = []
@@ -622,9 +635,9 @@ def render_answer_charts(spec, data, T):
         st.info(T["no_sample"])
         return
     if len(figs) == 1:
-        render_chart_card(figs[0])
+        render_chart_card(figs[0], key=f"{key_prefix}_single")
     else:
-        render_chart_row(figs)
+        render_chart_row(figs, key_prefix=key_prefix)
 
 
 # ---------------------------------------------------------------------
@@ -658,11 +671,13 @@ if col6.button(T["b6"]):
 # ---------------------------------------------------------------------
 # 대화
 # ---------------------------------------------------------------------
-for msg in st.session_state.messages:
+for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
         if msg["role"] == "assistant":
-            render_answer_charts(msg.get("charts"), df, T)
+            # 메시지 인덱스를 key_prefix로 넘겨서, 같은 차트가 다른 메시지에서
+            # 반복돼도 고유한 key를 갖게 합니다.
+            render_answer_charts(msg.get("charts"), df, T, key_prefix=f"msg{idx}")
 
 user_input = st.chat_input(T["input"]) or example_clicked
 
@@ -679,7 +694,8 @@ if user_input:
                                lang=lang, tools_used=tools_used)
             charts = decide_charts(tools_used, df)
         st.write(answer)
-        render_answer_charts(charts, df, T)
+        # 이번 턴에 새로 나온 답변이므로, 아직 히스토리에 없는 고유한 key_prefix를 씁니다.
+        render_answer_charts(charts, df, T, key_prefix="current")
 
     st.session_state.messages.append(
         {"role": "assistant", "content": answer, "charts": charts}

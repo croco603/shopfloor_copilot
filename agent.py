@@ -288,6 +288,22 @@ SYSTEM_PROMPT = """\
   Cycle_Time=사이클타임, Plasticizing_Time=가소화시간
 """
 
+# 답변 언어를 정하는 규칙. app.py의 언어 토글에서 lang을 넘겨받습니다.
+# 시스템 프롬프트 뒤에 덧붙이는 방식이라, 위의 모든 원칙은 그대로 적용됩니다.
+LANG_RULE = {
+    "ko": "",
+    "en": (
+        "\n\n[Language]\n"
+        "Answer in English. All rules above still apply.\n"
+        "Use these field terms: mold temperature, barrel temperature, hopper temperature,\n"
+        "injection speed, injection time, filling time, plasticizing time,\n"
+        "screw RPM, back pressure, holding pressure, cycle time, cushion position.\n"
+        "Keep defect reason names as: gas, short shot (미성형), initial tolerance defect (초기허용불량).\n"
+        "Part codes (CN7, RG3) and operating modes stay as they are, but translate\n"
+        "'저속' as 'low-speed' and '고속' as 'high-speed'."
+    ),
+}
+
 # 함수 이름 -> 실제 파이썬 함수 매핑 (Claude가 고른 도구 이름으로 실제 함수를 찾기 위함)
 FUNCTION_MAP = {
     "get_worst_day": lambda df, **kw: f.get_worst_day(df, days=kw.get("days")),
@@ -307,8 +323,16 @@ FUNCTION_MAP = {
 }
 
 
-def ask(question: str, df, history=None) -> str:
-    """사용자 질문 하나를 받아 최종 답변 문자열을 반환합니다."""
+def ask(question: str, df, history=None, lang: str = "ko", tools_used=None) -> str:
+    """사용자 질문 하나를 받아 최종 답변 문자열을 반환합니다.
+
+    lang       : 'ko' 또는 'en'. 답변 언어를 정합니다.
+    tools_used : 리스트를 넘기면, 이번 답변에서 실제로 호출된 도구 이름이 담깁니다.
+                 app.py가 "어떤 그래프를 그릴지" 판단할 때 씁니다.
+                 (질문 문자열을 비교하는 방식은 사용자가 직접 타이핑하면 빗나갑니다.)
+    """
+    system = SYSTEM_PROMPT + LANG_RULE.get(lang, "")
+
     # history는 app.py의 st.session_state.messages에서 그대로 넘어옵니다.
     # app.py가 화면 표시용으로 role/content 외의 필드(예: show_chart 같은 UI 상태값)를
     # 같이 저장해도, Claude API는 role/content 외의 필드를 절대 허용하지 않습니다.
@@ -324,7 +348,7 @@ def ask(question: str, df, history=None) -> str:
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=system,
         tools=TOOLS,
         messages=messages,
     )
@@ -336,6 +360,8 @@ def ask(question: str, df, history=None) -> str:
 
         tool_results = []
         for block in tool_use_blocks:
+            if tools_used is not None:
+                tools_used.append(block.name)   # 어떤 도구를 썼는지 app.py에 알려줍니다
             func = FUNCTION_MAP.get(block.name)
             if func is None:
                 result = {"error": f"알 수 없는 도구: {block.name}"}
@@ -353,7 +379,7 @@ def ask(question: str, df, history=None) -> str:
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=system,
             tools=TOOLS,
             messages=messages,
         )
@@ -361,7 +387,9 @@ def ask(question: str, df, history=None) -> str:
     final_text = "".join(b.text for b in response.content if b.type == "text")
     # 답변이 비어 있으면 그대로 대화 기록에 저장되어 다음 질문에서 API 오류를 냅니다.
     if not final_text.strip():
-        return "답변을 만들지 못했습니다. 질문을 조금 더 구체적으로 해주시겠어요?"
+        return ("답변을 만들지 못했습니다. 질문을 조금 더 구체적으로 해주시겠어요?"
+                if lang == "ko" else
+                "I couldn't generate an answer. Could you make the question more specific?")
     return final_text
 
 
