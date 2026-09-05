@@ -366,25 +366,10 @@ def make_mode_compare_fig(mode_info):
     return fig
 
 
-# ---------------------------------------------------------------------
-# 대시보드 렌더링 — 항상 화면 위쪽에 떠 있는 공정 현황 요약
-# ---------------------------------------------------------------------
-st.subheader("📊 공정 현황 대시보드")
-render_kpi_row(df)
-
-st.plotly_chart(make_trend_fig(daily_rate), use_container_width=True)
-
-reason_fig = make_reason_fig(df)
-part_fig = make_part_fig(df)
-side_fig = make_side_fig(df)
-
-_dash_figs = [fig for fig in (reason_fig, part_fig, side_fig) if fig is not None]
-if _dash_figs:
-    for col, fig in zip(st.columns(len(_dash_figs)), _dash_figs):
-        col.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-st.subheader("💬 질문하기")
+# 대시보드(공정 현황 요약)는 페이지를 열자마자 항상 보이는 게 아니라,
+# 아래 "지금 공정 상황이 어때요?" 같은 질문을 했을 때만 답변으로 보여줍니다.
+# — 이 앱의 핵심은 "물어보면 AI가 찾아서 보여준다"는 대화형 경험이라,
+#   질문하기도 전에 결론을 다 까놓으면 그 경험이 죽습니다.
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -395,6 +380,7 @@ col1, col2, col3, col4 = st.columns(4)
 example_clicked = None
 STEP1_QUESTION = "이번 주에 불량 유독 많았던 날 있었어요?"
 STEP2_QUESTION = "가스 불량 났을 때 정상 제품이랑 뭐가 제일 달랐어요?"
+OVERVIEW_QUESTION = "지금 공정 상황이 어때요?"
 if col1.button("이번 주 불량 많았던 날?"):
     example_clicked = STEP1_QUESTION
 if col2.button("가스 불량 원인은?"):
@@ -409,9 +395,14 @@ if col4.button("야간에 불량이 왜 많아요?"):
 # 둘째 줄 — 미성형/RG3는 검증된 조치안이 없는 조합이라, '모른다'를 정직하게
 # 인정하는 모습을 STEP4(야간 질문)와는 다른 맥락(조치 제안)에서 한 번 더
 # 보여줄 수 있는 버튼입니다. part_code를 문장에 직접 넣어 RG3로 확실히 유도합니다.
-col5, = st.columns(1)
+# "지금 공정 상황이 어때요?"는 전체 현황(총생산량/불량률/원인별/품번별/좌우)을
+# 대시보드 형태로 보여주는 질문입니다 — 페이지를 열자마자가 아니라, 이렇게
+# 물어봤을 때만 뜨도록 일부러 챗봇 답변 쪽에 붙여뒀습니다.
+col5, col6 = st.columns(2)
 if col5.button("미성형은 RG3에서 어떻게 막아요?"):
     example_clicked = "미성형은 RG3에서 어떻게 막아야 해요?"
+if col6.button("지금 공정 상황 요약해줘"):
+    example_clicked = OVERVIEW_QUESTION
 
 
 def render_answer_charts(question, data):
@@ -422,6 +413,18 @@ def render_answer_charts(question, data):
     그 도구 이름 기준으로 바꾸는 게 더 정확합니다 (질문을 조금 다르게 표현해도
     같은 차트가 뜨도록).
     """
+    if question == OVERVIEW_QUESTION:
+        render_kpi_row(data)
+        st.plotly_chart(make_trend_fig(daily_rate), use_container_width=True)
+
+        dash_figs = [fig for fig in (
+            make_reason_fig(data), make_part_fig(data), make_side_fig(data),
+        ) if fig is not None]
+        if dash_figs:
+            for col, fig in zip(st.columns(len(dash_figs)), dash_figs):
+                col.plotly_chart(fig, use_container_width=True)
+        return
+
     if question == STEP1_QUESTION:
         st.plotly_chart(make_defect_chart(daily_rate), use_container_width=True)
         return
@@ -459,7 +462,7 @@ if user_input:
             answer = agent.ask(user_input, df, history=history)
         st.write(answer)
 
-        show_chart = user_input in (STEP1_QUESTION, STEP2_QUESTION)
+        show_chart = user_input in (STEP1_QUESTION, STEP2_QUESTION, OVERVIEW_QUESTION)
         if show_chart:
             render_answer_charts(user_input, df)
 
