@@ -22,6 +22,9 @@ import functions as f
 load_dotenv()
 client = anthropic.Anthropic()  # API 키는 환경변수 ANTHROPIC_API_KEY 로 설정
 MODEL = "claude-haiku-4-5-20251001"
+# 답변에 표가 들어가면 1024로는 중간에 잘립니다.
+# 잘린 답변(또는 빈 답변)이 대화 기록에 들어가면 다음 질문에서 API 오류가 납니다.
+MAX_TOKENS = 4096
 
 # ---------------------------------------------------------------------
 # Claude에게 알려줄 '도구 목록'
@@ -32,9 +35,20 @@ TOOLS = [
         "name": "get_worst_day",
         "description": (
             "날짜별 불량률을 계산해 불량이 가장 많았던 날을 찾는다. "
-            "'이번 주에 불량 많았던 날 있었어?', '요즘 불량률 어때?' 같은 질문에 사용."
+            "'이번 주에 불량 많았던 날 있었어?', '요즘 불량률 어때?', "
+            "'최근에 불량이 늘어나는 추세야?' 같은 질문에 사용. "
+            "데이터의 마지막 생산일을 '오늘'로 보고 계산한다."
         ),
-        "input_schema": {"type": "object", "properties": {}},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": ("최근 며칠만 볼지. '이번 주'는 7, '최근 2주'는 14. "
+                                    "생략하면 전체 기간."),
+                },
+            },
+        },
     },
     {
         "name": "compare_normal_vs_defect",
@@ -107,7 +121,9 @@ TOOLS = [
             "'불량 줄이려면 뭘 먼저 봐야 해?', '어떤 품번을 봐야 할지' 판단할 때 먼저 호출한다. "
             "결과는 defect_rate_pct(불량률) 기준으로 정렬되어 있다. "
             "n_defect(건수)만 보고 우선순위를 말하지 마라 — 생산량이 많은 품번은 "
-            "불량률이 낮아도 건수만 많아 보일 수 있다. 반드시 defect_rate_pct 기준으로 답하라."
+            "불량률이 낮아도 건수만 많아 보일 수 있다. 반드시 defect_rate_pct 기준으로 답하라. "
+            "결과의 by_side에는 좌우(LH/RH)별 불량률이 들어 있어, "
+            "'LH랑 RH 중 어디가 불량이 많아?' 질문에도 이 도구로 답할 수 있다."
         ),
         "input_schema": {
             "type": "object",
@@ -152,7 +168,9 @@ TOOLS = [
             "'지금 배럴온도 설정 괜찮아?'처럼 값을 지정한 질문에는 "
             "compare_normal_vs_defect 대신 반드시 이 도구를 사용한다. "
             "(compare_normal_vs_defect는 상위 몇 개만 돌려주므로, 지정한 값이 "
-            "목록에 없으면 답할 수 없다.) part_code는 필수다. "
+            "목록에 없으면 답할 수 없다.) "
+            "part_code를 생략하면 불량이 있는 모든 품번을 자동으로 계산하므로, "
+            "사용자에게 품번을 되묻지 말고 그냥 호출하라. "
             "해당 품번에 운전 조건(저속/고속)이 있는데 mode를 지정하지 않으면 "
             "자동으로 저속/고속을 나눠 by_mode로 돌려준다 — 이때 두 조건의 "
             "결과가 다를 수 있으므로 반드시 조건별로 나누어 답하라."
@@ -167,10 +185,14 @@ TOOLS = [
                                     "사이클타임, 가소화시간, 쿠션위치, 형체시간 중 하나."),
                 },
                 "reason": {"type": "string", "description": "불량 원인(선택). 생략하면 전체 불량 대상."},
-                "part_code": {"type": "string", "description": "품번 코드. 'CN7' 또는 'RG3'. 필수."},
+                "part_code": {
+                    "type": "string",
+                    "description": ("품번 코드. 'CN7' 또는 'RG3'. 생략하면 불량이 있는 "
+                                    "모든 품번을 자동으로 계산한다. 사용자에게 품번을 되묻지 말 것."),
+                },
                 "mode": {"type": "string", "description": "운전 조건(선택). '저속' 또는 '고속'."},
             },
-            "required": ["variable", "part_code"],
+            "required": ["variable"],
         },
     },
     {
@@ -230,12 +252,20 @@ SYSTEM_PROMPT = """\
 - suggest_action이 has_verified_rule=false를 돌려주면, 검증된 조치안이 없다는 사실을
   밝히고 "확인해볼 값"만 제시하세요. 조치를 지어내지 마세요.
 
-[되묻지 않기]
-- 현장 작업자는 몰라서 물어본 것입니다. 사용자에게 원인을 되묻지 마세요.
-  ("그날 무슨 일이 있었나요?", "설정을 바꾸셨나요?" 같은 질문 금지)
-- 품번을 모르면 사용자에게 묻지 말고 list_part_codes로 직접 확인하세요.
-- 대신 도구를 더 호출해 직접 알아내거나, 다음에 무엇을 분석할지 제안하세요.
-  예: "이어서 그날 불량의 원인을 분석해 드릴까요?"
+[되묻지 않기 — 자주 어기는 규칙이니 특히 주의]
+- 현장 작업자는 몰라서 물어본 것입니다. 사용자에게 되묻지 마세요.
+- 특히 다음은 절대 묻지 마세요. 도구가 알아서 처리하거나, 도구로 확인하면 됩니다.
+  · "어느 품번인가요?" → part_code를 비우고 호출하면 전체 품번이 나옵니다.
+  · "어떤 불량인가요?" → count_defects_by_reason으로 확인하거나 전체로 답하세요.
+  · "둘 다 확인해드릴까요?" → 묻지 말고 둘 다 확인해서 답하세요.
+  · "확인해 보실까요?" → 묻지 말고 확인해서 결과를 주세요.
+  · "그날 무슨 일이 있었나요?", "설정을 바꾸셨나요?" → 사용자가 아는 정보가 아닙니다.
+- 답을 다 준 뒤에 "다음으로 무엇을 분석할까요?"라고 제안하는 것은 괜찮습니다.
+  하지만 답을 주기 전에 정보를 요구하는 것은 안 됩니다.
+
+[LH/RH 질문]
+- list_part_codes 결과의 by_side에 좌우별 불량률이 들어 있습니다.
+  "LH랑 RH 중 어디가 불량이 많아?"는 이 값으로 답하세요.
 
 [값을 지정한 질문]
 - "금형온도가 관계있어?"처럼 특정 값을 지목한 질문에는 반드시 check_variable을 쓰세요.
@@ -260,7 +290,7 @@ SYSTEM_PROMPT = """\
 
 # 함수 이름 -> 실제 파이썬 함수 매핑 (Claude가 고른 도구 이름으로 실제 함수를 찾기 위함)
 FUNCTION_MAP = {
-    "get_worst_day": lambda df, **kw: f.get_worst_day(df),
+    "get_worst_day": lambda df, **kw: f.get_worst_day(df, days=kw.get("days")),
     "compare_normal_vs_defect": lambda df, **kw: f.compare_normal_vs_defect(
         df, kw["reason"], part_code=kw.get("part_code"), mode=kw.get("mode")),
     "get_operating_modes": lambda df, **kw: f.detect_operating_modes(df, kw["part_code"]),
@@ -283,14 +313,17 @@ def ask(question: str, df, history=None) -> str:
     # app.py가 화면 표시용으로 role/content 외의 필드(예: show_chart 같은 UI 상태값)를
     # 같이 저장해도, Claude API는 role/content 외의 필드를 절대 허용하지 않습니다.
     # 여기서 role/content만 남기고 나머지는 걸러내야 API 호출이 깨지지 않습니다.
+    # 내용이 빈 메시지도 API가 거부하므로 함께 걸러냅니다.
     clean_history = [
-        {"role": h["role"], "content": h["content"]} for h in (history or [])
+        {"role": h["role"], "content": h["content"]}
+        for h in (history or [])
+        if str(h.get("content", "")).strip()
     ]
     messages = clean_history + [{"role": "user", "content": question}]
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=1024,
+        max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         tools=TOOLS,
         messages=messages,
@@ -319,13 +352,16 @@ def ask(question: str, df, history=None) -> str:
 
         response = client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
             tools=TOOLS,
             messages=messages,
         )
 
     final_text = "".join(b.text for b in response.content if b.type == "text")
+    # 답변이 비어 있으면 그대로 대화 기록에 저장되어 다음 질문에서 API 오류를 냅니다.
+    if not final_text.strip():
+        return "답변을 만들지 못했습니다. 질문을 조금 더 구체적으로 해주시겠어요?"
     return final_text
 
 
