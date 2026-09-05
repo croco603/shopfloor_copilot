@@ -3,18 +3,130 @@ app.py
 ------
 현장 작업자가 보는 채팅 화면입니다. (Streamlit)
 실행 방법: streamlit run app.py
+
+구성
+  - 사이드바: 언어 선택(영어 기본), 데이터 업로드, 대화 초기화
+  - 본문: 예시 질문 버튼 + 채팅
+  - 차트: '실제로 호출된 도구'를 보고 답변 아래에 자동으로 붙습니다.
+          (질문 문장을 비교하면 사용자가 직접 타이핑할 때 빗나갑니다.)
+  - 대시보드는 페이지를 열자마자가 아니라, "지금 공정 상황이 어때요?"처럼
+    물어봤을 때만 보여줍니다. 이 앱의 핵심은 대화형 경험이라, 질문하기도 전에
+    결론을 다 까놓으면 그 경험이 죽습니다.
 """
 
+import json
+
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import functions as f
 import agent
 
 st.set_page_config(page_title="ShopFloor Copilot", page_icon="🏭", layout="wide")
-st.title("🏭 ShopFloor Copilot")
-st.caption("현장에서 쓰는 말로 물어보세요. 공정 데이터를 근거로 답합니다.")
+
+# ---------------------------------------------------------------------
+# 화면 문구 (영어 / 한국어)
+# 심사위원이 영어권이므로 화면·답변·차트 제목을 모두 전환할 수 있게 합니다.
+# ---------------------------------------------------------------------
+LANG = {
+    "en": {
+        "caption": "Ask in plain language. Answers are backed by process data.",
+        "ref_date": "Data as of {d} · {n:,} records",
+        "settings": "Settings",
+        "upload": "Upload process data (CSV)",
+        "upload_ok": "Analyzing your uploaded data ({n:,} rows)",
+        "missing": "Missing required columns: {cols}",
+        "reset": "Clear conversation",
+        "drop": "\U0001F4C2 Drop your CSV file here",
+        "drop_alert": "Only CSV files can be uploaded.",
+        "drop_no_input": "Could not find the file input.",
+        "examples": "**Example questions**",
+        "input": "Ask a question",
+        "spinner": "Checking the data...",
+        "kpi_total": "Total production",
+        "kpi_rate": "Overall defect rate",
+        "kpi_reason": "Top defect reason",
+        "kpi_part": "Highest defect rate",
+        "unit_ea": "{v:,}",
+        "unit_case": "{v} cases",
+        "t_prod": "Daily production",
+        "t_rate": "Daily defect rate (%)",
+        "t_reason": "Defects by reason",
+        "t_part": "Defect rate by part",
+        "t_side": "Defect rate by side (LH/RH)",
+        "t_var": "Normal vs defective — key variables",
+        "t_mode": "Defect rate by operating mode (by {v})",
+        "l_prod": "Production",
+        "l_rate": "Defect rate",
+        "l_worst": "Peak {v}%",
+        "l_worst_name": "Peak",
+        "l_normal": "Normal",
+        "l_defect": "Defective",
+        "mode_labels": {"저속": "Low speed", "고속": "High speed"},
+        "no_sample": "Not enough samples to compare, so the chart is omitted.",
+        "b1": "Worst day this week?",
+        "b2": "Why gas defects?",
+        "b3": "What should we adjust?",
+        "b4": "Why more defects at night?",
+        "b5": "How to prevent short shots on RG3?",
+        "b6": "Give me an overview",
+        "q1": "Was there a day with an unusually high defect rate this week?",
+        "q2": "What was different from normal products when gas defects happened?",
+        "q3": "So what should we adjust?",
+        "q4": "Why are there more defects at night?",
+        "q5": "How can we prevent short shots on RG3?",
+        "q6": "How does the process look right now?",
+    },
+    "ko": {
+        "caption": "현장에서 쓰는 말로 물어보세요. 공정 데이터를 근거로 답합니다.",
+        "ref_date": "데이터 기준일: {d} · 총 {n:,}건",
+        "settings": "설정",
+        "upload": "공정 데이터 업로드 (CSV)",
+        "upload_ok": "업로드한 데이터로 분석합니다 ({n:,}행)",
+        "missing": "필요한 컬럼이 없습니다: {cols}",
+        "reset": "대화 초기화",
+        "drop": "\U0001F4C2 여기에 CSV 파일을 놓으세요",
+        "drop_alert": "CSV 파일만 업로드할 수 있습니다.",
+        "drop_no_input": "파일 입력창을 찾을 수 없습니다.",
+        "examples": "**예시 질문**",
+        "input": "질문을 입력하세요",
+        "spinner": "데이터 확인 중...",
+        "kpi_total": "총 생산량",
+        "kpi_rate": "전체 불량률",
+        "kpi_reason": "최다 불량 원인",
+        "kpi_part": "불량률 최고 품번",
+        "unit_ea": "{v:,}개",
+        "unit_case": "{v}건",
+        "t_prod": "일별 생산량",
+        "t_rate": "일별 불량률(%)",
+        "t_reason": "불량 원인별 건수",
+        "t_part": "품번별 불량률",
+        "t_side": "좌우(LH/RH) 불량률",
+        "t_var": "정상 vs 불량 — 주요 변수 비교",
+        "t_mode": "운전조건별 불량률 ({v} 기준)",
+        "l_prod": "생산량",
+        "l_rate": "불량률",
+        "l_worst": "최고 {v}%",
+        "l_worst_name": "최고 불량률",
+        "l_normal": "정상",
+        "l_defect": "불량",
+        "mode_labels": {"저속": "저속", "고속": "고속"},
+        "no_sample": "이 데이터에서는 비교할 만한 표본이 부족해서 그래프를 생략했습니다.",
+        "b1": "이번 주 불량 많았던 날?",
+        "b2": "가스 불량 원인은?",
+        "b3": "뭘 조정해야 해?",
+        "b4": "야간에 불량이 왜 많아요?",
+        "b5": "미성형은 RG3에서 어떻게 막아요?",
+        "b6": "지금 공정 상황 요약해줘",
+        "q1": "이번 주에 불량 유독 많았던 날 있었어요?",
+        "q2": "가스 불량 났을 때 정상 제품이랑 뭐가 제일 달랐어요?",
+        "q3": "그럼 뭘 조정해야 해요?",
+        "q4": "야간에 불량이 왜 더 많아요?",
+        "q5": "미성형은 RG3에서 어떻게 막아야 해요?",
+        "q6": "지금 공정 상황이 어때요?",
+    },
+}
 
 # ---------------------------------------------------------------------
 # 색상 팔레트 (다크 테마 기준 검증된 데이터 시각화 팔레트에서 가져온 값)
@@ -31,23 +143,109 @@ CHART_BASE_LAYOUT = dict(
     margin=dict(l=10, r=10, t=40, b=10),
 )
 
+# ---------------------------------------------------------------------
+# 사이드바 — 언어 / 업로드 / 초기화
+# ---------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### Language / 언어")
+    # 심사위원이 처음 열었을 때 영어가 보이도록 영어를 기본값으로 둡니다.
+    _choice = st.radio("Language", ["English", "한국어"], index=0,
+                       horizontal=True, label_visibility="collapsed")
+    lang = "en" if _choice == "English" else "ko"
+    T = LANG[lang]
+
+    st.markdown("### " + T["settings"])
+    uploaded_file = st.file_uploader(T["upload"], type="csv", key="csv_uploader")
+    if st.button(T["reset"]):
+        st.session_state.messages = []
+        st.rerun()
+
+st.title("🏭 ShopFloor Copilot")
+st.caption(T["caption"])
+
 
 @st.cache_data
 def get_data(source=None):
     return f.load_data(source)
 
 
-uploaded_file = st.sidebar.file_uploader("공정 데이터 업로드 (CSV)", type="csv", key="csv_uploader")
-
 # ▼ 화면 전체 드래그 앤 드롭 업로드 기능 ▼
-# st.markdown + <img onerror> 트릭으로 스크립트를 화면 최상위 문서에 직접 심습니다.
-# (components.html의 iframe 방식은 브라우저 보안 정책 때문에 window.parent 접근이
-# 막히는 경우가 있어 이 방식으로 우회합니다. JS는 base64로 인코딩해 따옴표 충돌을 피합니다.)
-# — 지원님이 배포 환경에서 더 안정적으로 동작한다고 확인해준 방식으로 교체했습니다.
-_DROP_ZONE_JS_B64 = "KGZ1bmN0aW9uKCkgewogICAgaWYgKGRvY3VtZW50LmJvZHkuZGF0YXNldC5kcm9wWm9uZUluc3RhbGxlZCkgeyByZXR1cm47IH0KICAgIGRvY3VtZW50LmJvZHkuZGF0YXNldC5kcm9wWm9uZUluc3RhbGxlZCA9ICd0cnVlJzsKCiAgICBmdW5jdGlvbiBzaG93T3ZlcmxheSgpIHsKICAgICAgICBsZXQgb3ZlcmxheSA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCdkcm9wT3ZlcmxheScpOwogICAgICAgIGlmICghb3ZlcmxheSkgewogICAgICAgICAgICBvdmVybGF5ID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7CiAgICAgICAgICAgIG92ZXJsYXkuaWQgPSAnZHJvcE92ZXJsYXknOwogICAgICAgICAgICBvdmVybGF5LnN0eWxlLmNzc1RleHQgPSAncG9zaXRpb246Zml4ZWQ7dG9wOjA7bGVmdDowO3dpZHRoOjEwMCU7aGVpZ2h0OjEwMCU7YmFja2dyb3VuZDpyZ2JhKDAsMTAwLDI1NSwwLjE1KTtib3JkZXI6NHB4IGRhc2hlZCAjMDA2NGZmO3otaW5kZXg6OTk5OTk5O2Rpc3BsYXk6ZmxleDthbGlnbi1pdGVtczpjZW50ZXI7anVzdGlmeS1jb250ZW50OmNlbnRlcjtmb250LXNpemU6MjhweDtjb2xvcjojMDA2NGZmO2ZvbnQtd2VpZ2h0OmJvbGQ7cG9pbnRlci1ldmVudHM6bm9uZTsnOwogICAgICAgICAgICBvdmVybGF5LmlubmVyVGV4dCA9ICdcdWQ4M2RcdWRjYzIgXHVjNWVjXHVhZTMwXHVjNWQwIENTViBcdWQzMGNcdWM3N2NcdWM3NDQgXHViMTkzXHVjNzNjXHVjMTM4XHVjNjk0JzsKICAgICAgICAgICAgZG9jdW1lbnQuYm9keS5hcHBlbmRDaGlsZChvdmVybGF5KTsKICAgICAgICB9CiAgICAgICAgb3ZlcmxheS5zdHlsZS5kaXNwbGF5ID0gJ2ZsZXgnOwogICAgfQoKICAgIGZ1bmN0aW9uIGhpZGVPdmVybGF5KCkgewogICAgICAgIGNvbnN0IG92ZXJsYXkgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnZHJvcE92ZXJsYXknKTsKICAgICAgICBpZiAob3ZlcmxheSkgb3ZlcmxheS5zdHlsZS5kaXNwbGF5ID0gJ25vbmUnOwogICAgfQoKICAgIGRvY3VtZW50LmFkZEV2ZW50TGlzdGVuZXIoJ2RyYWdvdmVyJywgZnVuY3Rpb24oZSkgewogICAgICAgIGUucHJldmVudERlZmF1bHQoKTsKICAgICAgICBzaG93T3ZlcmxheSgpOwogICAgfSk7CgogICAgZG9jdW1lbnQuYWRkRXZlbnRMaXN0ZW5lcignZHJhZ2xlYXZlJywgZnVuY3Rpb24oZSkgewogICAgICAgIGlmIChlLmNsaWVudFggPD0gMCB8fCBlLmNsaWVudFkgPD0gMCkgaGlkZU92ZXJsYXkoKTsKICAgIH0pOwoKICAgIGRvY3VtZW50LmFkZEV2ZW50TGlzdGVuZXIoJ2Ryb3AnLCBmdW5jdGlvbihlKSB7CiAgICAgICAgZS5wcmV2ZW50RGVmYXVsdCgpOwogICAgICAgIGhpZGVPdmVybGF5KCk7CgogICAgICAgIGNvbnN0IGZpbGVzID0gZS5kYXRhVHJhbnNmZXIuZmlsZXM7CiAgICAgICAgaWYgKGZpbGVzLmxlbmd0aCA9PT0gMCkgcmV0dXJuOwoKICAgICAgICBpZiAoIWZpbGVzWzBdLm5hbWUudG9Mb3dlckNhc2UoKS5lbmRzV2l0aCgnLmNzdicpKSB7CiAgICAgICAgICAgIGFsZXJ0KCdDU1YgXHVkMzBjXHVjNzdjXHViOWNjIFx1YzVjNVx1Yjg1Y1x1YjRkYyBcdWMyMTggXHVjNzg4XHVjMmI1XHViMmM4XHViMmU0LicpOwogICAgICAgICAgICByZXR1cm47CiAgICAgICAgfQoKICAgICAgICBjb25zdCBmaWxlSW5wdXQgPSBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKCdpbnB1dFt0eXBlPSJmaWxlIl0nKTsKICAgICAgICBpZiAoIWZpbGVJbnB1dCkgewogICAgICAgICAgICBhbGVydCgnZmlsZV91cGxvYWRlciBcdWM3ODVcdWI4MjVcdWNjM2RcdWM3NDQgXHVjYzNlXHVjNzQ0IFx1YzIxOCBcdWM1YzZcdWMyYjVcdWIyYzhcdWIyZTQuJyk7CiAgICAgICAgICAgIHJldHVybjsKICAgICAgICB9CgogICAgICAgIGNvbnN0IGRhdGFUcmFuc2ZlciA9IG5ldyBEYXRhVHJhbnNmZXIoKTsKICAgICAgICBkYXRhVHJhbnNmZXIuaXRlbXMuYWRkKGZpbGVzWzBdKTsKICAgICAgICBmaWxlSW5wdXQuZmlsZXMgPSBkYXRhVHJhbnNmZXIuZmlsZXM7CgogICAgICAgIGNvbnN0IGNoYW5nZUV2ZW50ID0gbmV3IEV2ZW50KCdjaGFuZ2UnLCB7IGJ1YmJsZXM6IHRydWUgfSk7CiAgICAgICAgZmlsZUlucHV0LmRpc3BhdGNoRXZlbnQoY2hhbmdlRXZlbnQpOwogICAgfSk7Cn0pKCk7"
-st.markdown(
-    f'<img src="x" onerror="eval(atob(\'{_DROP_ZONE_JS_B64}\'))" style="display:none">',
-    unsafe_allow_html=True,
+# Streamlit은 file_uploader 박스 안에서만 드롭을 받습니다. 화면 어디에 놓아도
+# 업로드되게 하려고, 최상위 문서(window.parent.document)에 드롭 이벤트를 직접 답니다.
+#
+# 주의: st.markdown(unsafe_allow_html=True)로 <img onerror="..."> 를 넣는 방법은
+#      Streamlit이 이벤트 속성(onerror 등)을 지워버려서 실행되지 않습니다.
+#      그래서 components.html로 iframe을 하나 띄우고, 그 안에서 부모 문서를 조작합니다.
+#      (iframe은 높이 0이라 화면에 보이지 않습니다.)
+_DROP_ZONE_JS = """
+<script>
+(function() {
+    const doc = window.parent.document;
+    if (!doc || doc.body.dataset.dropZoneInstalled) { return; }
+    doc.body.dataset.dropZoneInstalled = 'true';
+
+    function showOverlay() {
+        let overlay = doc.getElementById('dropOverlay');
+        if (!overlay) {
+            overlay = doc.createElement('div');
+            overlay.id = 'dropOverlay';
+            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,100,255,0.15);border:4px dashed #0064ff;z-index:999999;display:flex;align-items:center;justify-content:center;font-size:28px;color:#0064ff;font-weight:bold;pointer-events:none;';
+            overlay.innerText = __DROP_TEXT__;
+            doc.body.appendChild(overlay);
+        }
+        overlay.innerText = __DROP_TEXT__;
+        overlay.style.display = 'flex';
+    }
+
+    function hideOverlay() {
+        const overlay = doc.getElementById('dropOverlay');
+        if (overlay) overlay.style.display = 'none';
+    }
+
+    doc.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        showOverlay();
+    });
+
+    doc.addEventListener('dragleave', function(e) {
+        if (e.clientX <= 0 || e.clientY <= 0) hideOverlay();
+    });
+
+    doc.addEventListener('drop', function(e) {
+        e.preventDefault();
+        hideOverlay();
+
+        const files = e.dataTransfer.files;
+        if (!files || files.length === 0) return;
+
+        if (!files[0].name.toLowerCase().endsWith('.csv')) {
+            alert(__DROP_ALERT__);
+            return;
+        }
+
+        // 사이드바의 file_uploader 입력창을 찾아 파일을 강제로 넣어줍니다.
+        const fileInput = doc.querySelector('section[data-testid="stSidebar"] input[type="file"]')
+                       || doc.querySelector('input[type="file"]');
+        if (!fileInput) {
+            alert(__DROP_NO_INPUT__);
+            return;
+        }
+
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(files[0]);
+        fileInput.files = dataTransfer.files;
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+})();
+</script>
+"""
+
+components.html(
+    _DROP_ZONE_JS
+    .replace("__DROP_TEXT__", json.dumps(T["drop"]))
+    .replace("__DROP_ALERT__", json.dumps(T["drop_alert"]))
+    .replace("__DROP_NO_INPUT__", json.dumps(T["drop_no_input"])),
+    height=0,
 )
 # ▲ 화면 전체 드래그 앤 드롭 업로드 기능 끝 ▲
 
@@ -55,11 +253,15 @@ if uploaded_file is not None:
     df_up = pd.read_csv(uploaded_file)
     missing = f.validate_columns(df_up)
     if missing:
-        st.error(f"필요한 컬럼이 없습니다: {', '.join(missing[:5])}")
+        st.error(T["missing"].format(cols=", ".join(missing[:5])))
         st.stop()
     df = get_data(uploaded_file)
+    st.sidebar.success(T["upload_ok"].format(n=len(df)))
 else:
     df = get_data()
+
+# 2020년 데이터를 쓰는 이유를 심사위원이 바로 알 수 있게 기준일을 밝힙니다.
+st.caption(T["ref_date"].format(d=df["date"].max(), n=len(df)))
 
 
 @st.cache_data
@@ -80,7 +282,7 @@ daily_rate = get_daily_defect_rate(df)
 # ---------------------------------------------------------------------
 # 대시보드 — 핵심 지표 (KPI)
 # ---------------------------------------------------------------------
-def render_kpi_row(data):
+def render_kpi_row(data, T):
     total = len(data)
     n_fail = int((data["PassOrFail"] == "N").sum())
     fail_rate = round(n_fail / total * 100, 2) if total else 0.0
@@ -92,11 +294,11 @@ def render_kpi_row(data):
     top_part = part_info["parts"][0] if part_info["parts"] else None
 
     kpis = [
-        ("총 생산량", f"{total:,}개", None),
-        ("전체 불량률", f"{fail_rate}%", f"불량 {n_fail}건"),
-        ("최다 불량 원인", top_reason["reason"] if top_reason else "-",
-         f"{top_reason['count']}건" if top_reason else None),
-        ("불량률 최고 품번", top_part["part_code"] if top_part else "-",
+        (T["kpi_total"], T["unit_ea"].format(v=total), None),
+        (T["kpi_rate"], f"{fail_rate}%", T["unit_case"].format(v=n_fail)),
+        (T["kpi_reason"], top_reason["reason"] if top_reason else "-",
+         T["unit_case"].format(v=top_reason["count"]) if top_reason else None),
+        (T["kpi_part"], top_part["part_code"] if top_part else "-",
          f"{top_part['defect_rate_pct']}%" if top_part else None),
     ]
     # 카드마다 테두리를 둘러서 배경 위에 붕 떠 보이지 않고 하나의 패널처럼 보이게 합니다.
@@ -121,68 +323,64 @@ def render_chart_row(figs):
 
 
 # ---------------------------------------------------------------------
-# 차트 1. 일별 생산량 + 불량률 추이
-# (두 지표의 단위가 달라서 한 그래프에 축 두 개로 억지로 합치지 않고,
-#  같은 x축을 공유하는 그래프 두 개를 위아래로 나눠서 보여줍니다)
+# 차트 1-1. 일별 생산량
+# 차트 1-2. 일별 불량률 (최고 불량률 날 강조)
+# 두 지표는 단위(개 vs %)도 다르고 쓰이는 질문 맥락도 달라서, 억지로 한 차트에
+# 묶지 않고 다른 차트들처럼 완전히 독립된 카드로 나눠서 보여줍니다.
 # ---------------------------------------------------------------------
-def make_trend_fig(daily):
+def make_production_fig(daily, T):
+    fig = go.Figure(go.Bar(
+        x=daily["date"], y=daily["생산"],
+        marker_color=COLOR_BLUE,
+        hovertemplate="%{x|%m/%d}<br>%{y}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=T["t_prod"],
+        height=340,
+        xaxis=dict(showgrid=False, tickformat="%m/%d"),
+        yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
+        **CHART_BASE_LAYOUT,
+    )
+    return fig
+
+
+def make_defect_rate_fig(daily, T):
     worst_idx = daily["불량률(%)"].idxmax()
     worst_row = daily.loc[worst_idx]
 
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.35, 0.65], vertical_spacing=0.16,
-        subplot_titles=("일별 생산량", "일별 불량률(%)"),
-    )
-
-    fig.add_trace(go.Bar(
-        x=daily["date"], y=daily["생산"],
-        marker_color=COLOR_BLUE,
-        name="생산량",
-        hovertemplate="%{x|%m/%d}<br>생산량: %{y}개<extra></extra>",
-    ), row=1, col=1)
-
+    fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=daily["date"], y=daily["불량률(%)"],
         mode="lines+markers",
         line=dict(color=COLOR_BLUE, width=2),
         marker=dict(size=6),
-        name="불량률",
-        hovertemplate="%{x|%m/%d}<br>불량률: %{y}%<extra></extra>",
-    ), row=2, col=1)
-
+        name=T["l_rate"],
+        hovertemplate="%{x|%m/%d}<br>%{y}%<extra></extra>",
+    ))
     fig.add_trace(go.Scatter(
         x=[worst_row["date"]], y=[worst_row["불량률(%)"]],
         mode="markers+text",
         marker=dict(size=14, color=COLOR_RED, symbol="star"),
-        text=[f"최고 {worst_row['불량률(%)']}%"],
+        text=[T["l_worst"].format(v=worst_row["불량률(%)"])],
         textposition="top center",
-        name="최고 불량률",
-        hovertemplate="%{x|%m/%d}<br>불량률: %{y}%<extra></extra>",
-    ), row=2, col=1)
-
+        name=T["l_worst_name"],
+        hovertemplate="%{x|%m/%d}<br>%{y}%<extra></extra>",
+    ))
     fig.update_layout(
-        height=480,
+        title=T["t_rate"],
+        height=340,
         showlegend=False,
-        hovermode="x unified",
-        margin=dict(l=10, r=10, t=50, b=20),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(showgrid=False, tickformat="%m/%d"),
+        yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
+        **CHART_BASE_LAYOUT,
     )
-    fig.update_xaxes(showgrid=True, gridcolor=COLOR_GRID, tickformat="%m/%d")
-    fig.update_yaxes(showgrid=True, gridcolor=COLOR_GRID, zeroline=False)
     return fig
-
-
-# 기존 이름 유지 — 채팅 답변 아래에서 계속 이 이름으로 호출합니다.
-def make_defect_chart(daily):
-    return make_trend_fig(daily)
 
 
 # ---------------------------------------------------------------------
 # 차트 2. 불량 원인별 건수 (가로 막대, 최다 원인만 강조)
 # ---------------------------------------------------------------------
-def make_reason_fig(data):
+def make_reason_fig(data, T):
     info = f.count_defects_by_reason(data)
     rows = info["by_reason"]
     if not rows:
@@ -196,12 +394,12 @@ def make_reason_fig(data):
     fig = go.Figure(go.Bar(
         x=counts, y=reasons, orientation="h",
         marker_color=colors,
-        text=[f"{c}건" for c in counts],
+        text=[str(c) for c in counts],
         textposition="outside",
-        hovertemplate="%{y}: %{x}건<extra></extra>",
+        hovertemplate="%{y}: %{x}<extra></extra>",
     ))
     fig.update_layout(
-        title="불량 원인별 건수",
+        title=T["t_reason"],
         height=340,
         xaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
         yaxis=dict(showgrid=False),
@@ -213,7 +411,7 @@ def make_reason_fig(data):
 # ---------------------------------------------------------------------
 # 차트 3. 품번별 불량률 비교 (세로 막대, 최고 불량률만 강조)
 # ---------------------------------------------------------------------
-def make_part_fig(data):
+def make_part_fig(data, T):
     info = f.list_part_codes(data)
     rows = info["parts"]
     if not rows:
@@ -232,7 +430,7 @@ def make_part_fig(data):
         hovertemplate="%{x}: %{y}%<extra></extra>",
     ))
     fig.update_layout(
-        title="품번별 불량률",
+        title=T["t_part"],
         height=340,
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
@@ -244,7 +442,7 @@ def make_part_fig(data):
 # ---------------------------------------------------------------------
 # 차트 4. 좌우(LH/RH) 불량률 비교
 # ---------------------------------------------------------------------
-def make_side_fig(data):
+def make_side_fig(data, T):
     info = f.list_part_codes(data)
     rows = info.get("by_side") or []
     if not rows:
@@ -263,7 +461,7 @@ def make_side_fig(data):
         hovertemplate="%{x}: %{y}%<extra></extra>",
     ))
     fig.update_layout(
-        title="좌우(LH/RH) 불량률",
+        title=T["t_side"],
         height=340,
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
@@ -275,36 +473,42 @@ def make_side_fig(data):
 # ---------------------------------------------------------------------
 # 차트 5. (STEP2 질문 전용) 정상 vs 불량 — 주요 변수 비교
 # ---------------------------------------------------------------------
-def make_variable_compare_fig(compare_result, top_n=4):
+def make_variable_compare_fig(compare_result, T, top_n=4):
     diffs = (compare_result or {}).get("top_differences") or []
     if not diffs:
         return None
     diffs = diffs[:top_n]
-    variables = [d["variable"] for d in diffs]
+    variables = [d["variable"].replace("_", " ") for d in diffs]
     normal_vals = [d["normal_mean"] for d in diffs]
     defect_vals = [d["defect_mean"] for d in diffs]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=variables, y=normal_vals, name="정상",
+        x=variables, y=normal_vals, name=T["l_normal"],
         marker_color=COLOR_BLUE,
         text=[str(v) for v in normal_vals], textposition="outside",
-        hovertemplate="%{x} 정상: %{y}<extra></extra>",
+        hovertemplate="%{x}: %{y}<extra></extra>",
     ))
     fig.add_trace(go.Bar(
-        x=variables, y=defect_vals, name="불량",
+        x=variables, y=defect_vals, name=T["l_defect"],
         marker_color=COLOR_RED,
         text=[str(v) for v in defect_vals], textposition="outside",
-        hovertemplate="%{x} 불량: %{y}<extra></extra>",
+        hovertemplate="%{x}: %{y}<extra></extra>",
     ))
     fig.update_layout(
-        title="정상 vs 불량 — 주요 변수 비교",
+        # 기존에는 위쪽 여백(margin.t=40)이 좁은 채로 제목이랑 범례를 둘 다
+        # 그 안에 밀어넣어서 글씨가 겹쳐 보였습니다. 여백을 넉넉히 키우고,
+        # 범례는 그 넓어진 여백의 아래쪽(그래프 바로 위)에, 제목은 위쪽에
+        # 오도록 확실히 떨어뜨립니다.
+        title=T["t_var"],
         barmode="group",
         height=360,
-        legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
+        margin=dict(l=10, r=10, t=80, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
-        **CHART_BASE_LAYOUT,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
     )
     return fig
 
@@ -312,14 +516,20 @@ def make_variable_compare_fig(compare_result, top_n=4):
 # ---------------------------------------------------------------------
 # 차트 6. (STEP2 질문 전용) 운전조건별 불량률 비교
 # ---------------------------------------------------------------------
-def make_mode_compare_fig(mode_info):
+def make_mode_compare_fig(mode_info, T):
     modes = (mode_info or {}).get("modes") or []
     if not modes:
         return None
-    names = [m["mode"] for m in modes]
+    # functions.py는 운전조건 이름을 항상 "저속"/"고속"(한글)으로 돌려주므로,
+    # 화면 언어가 영어일 때는 여기서 화면 표시용으로만 번역합니다
+    # (원본 데이터/로직은 그대로 두고 보여주는 글자만 바꿉니다).
+    labels = T.get("mode_labels", {})
+    names = [labels.get(m["mode"], m["mode"]) for m in modes]
     rates = [m["defect_rate_pct"] for m in modes]
     max_rate = max(rates)
     colors = [COLOR_RED if r == max_rate else COLOR_MUTED for r in rates]
+
+    split_var = mode_info.get("split_variable", "").replace("_", " ")
 
     fig = go.Figure(go.Bar(
         x=names, y=rates,
@@ -329,7 +539,7 @@ def make_mode_compare_fig(mode_info):
         hovertemplate="%{x}: %{y}%<extra></extra>",
     ))
     fig.update_layout(
-        title=f"운전조건별 불량률 ({mode_info.get('split_variable', '')} 기준)",
+        title=T["t_mode"].format(v=split_var),
         height=360,
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
@@ -338,83 +548,123 @@ def make_mode_compare_fig(mode_info):
     return fig
 
 
-# 대시보드(공정 현황 요약)는 페이지를 열자마자 항상 보이는 게 아니라,
-# 아래 "지금 공정 상황이 어때요?" 같은 질문을 했을 때만 답변으로 보여줍니다.
-# — 이 앱의 핵심은 "물어보면 AI가 찾아서 보여준다"는 대화형 경험이라,
-#   질문하기도 전에 결론을 다 까놓으면 그 경험이 죽습니다.
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# 예시 질문 버튼 (데모 시나리오 STEP1~4)
-st.write("**예시 질문:**")
-col1, col2, col3, col4 = st.columns(4)
-example_clicked = None
-STEP1_QUESTION = "이번 주에 불량 유독 많았던 날 있었어요?"
-STEP2_QUESTION = "가스 불량 났을 때 정상 제품이랑 뭐가 제일 달랐어요?"
-OVERVIEW_QUESTION = "지금 공정 상황이 어때요?"
-if col1.button("이번 주 불량 많았던 날?"):
-    example_clicked = STEP1_QUESTION
-if col2.button("가스 불량 원인은?"):
-    example_clicked = STEP2_QUESTION
-if col3.button("뭘 조정해야 해?"):
-    example_clicked = "그럼 뭘 조정해야 해요?"
-if col4.button("야간에 불량이 왜 많아요?"):
-    # STEP4 신뢰성 시연용 질문 — 데이터로 답할 수 없는 질문임을
-    # 솔직하게 인정하는 모습을 보여주기 위한 버튼입니다.
-    example_clicked = "야간에 불량이 왜 더 많아요?"
-
-# 둘째 줄 — 미성형/RG3는 검증된 조치안이 없는 조합이라, '모른다'를 정직하게
-# 인정하는 모습을 STEP4(야간 질문)와는 다른 맥락(조치 제안)에서 한 번 더
-# 보여줄 수 있는 버튼입니다. part_code를 문장에 직접 넣어 RG3로 확실히 유도합니다.
-# "지금 공정 상황이 어때요?"는 전체 현황(총생산량/불량률/원인별/품번별/좌우)을
-# 대시보드 형태로 보여주는 질문입니다 — 페이지를 열자마자가 아니라, 이렇게
-# 물어봤을 때만 뜨도록 일부러 챗봇 답변 쪽에 붙여뒀습니다.
-col5, col6 = st.columns(2)
-if col5.button("미성형은 RG3에서 어떻게 막아요?"):
-    example_clicked = "미성형은 RG3에서 어떻게 막아야 해요?"
-if col6.button("지금 공정 상황 요약해줘"):
-    example_clicked = OVERVIEW_QUESTION
+daily_rate = get_daily_defect_rate(df)
 
 
-def render_answer_charts(question, data):
-    """예시 질문에 맞춰, 답변 아래에 보여줄 차트를 그립니다.
+# ---------------------------------------------------------------------
+# 답변 아래 차트 — '실제로 호출된 도구'를 보고 정합니다.
+# 질문 문장을 비교하지 않으므로, 사용자가 직접 타이핑해도 차트가 나옵니다.
+# ---------------------------------------------------------------------
+def decide_charts(tools_used, data):
+    """도구 이름 목록을 보고, 붙일 차트 정보를 리스트로 돌려줍니다."""
+    used = set(tools_used)
+    spec = []
 
-    지금은 버튼 문구를 그대로 매칭해서 어떤 차트를 보여줄지 정하고 있습니다.
-    나중에 agent.ask가 실제로 사용한 도구 이름을 돌려주게 되면, 문구 매칭 대신
-    그 도구 이름 기준으로 바꾸는 게 더 정확합니다 (질문을 조금 다르게 표현해도
-    같은 차트가 뜨도록).
-    """
-    if question == OVERVIEW_QUESTION:
-        render_kpi_row(data)
-        render_chart_card(make_trend_fig(daily_rate))
-        render_chart_row([make_reason_fig(data), make_part_fig(data), make_side_fig(data)])
+    # 현황 요약 질문은 여러 도구를 한꺼번에 부릅니다 -> 대시보드 전체를 보여줍니다.
+    if len(used & {"count_defects_by_reason", "list_part_codes", "get_worst_day"}) >= 2:
+        return [{"kind": "overview"}]
+
+    if "get_worst_day" in used:
+        spec.append({"kind": "trend"})
+
+    wants_cause = "compare_normal_vs_defect" in used
+    if wants_cause or "get_operating_modes" in used:
+        parts = f.list_part_codes(data)["parts"]
+        top = next((p["part_code"] for p in parts if p["n_defect"] >= 5), None)
+        if top:
+            spec.append({"kind": "mode", "part_code": top})
+
+    if wants_cause:
+        # 실제로 차이가 나온 (원인·품번·조건) 조합을 하나만 골라 비교 차트를 붙입니다.
+        for reason in ("가스", "미성형", "초기허용불량"):
+            for part in ("CN7", "RG3"):
+                for mode in ("고속", "저속", None):
+                    r = f.compare_normal_vs_defect(data, reason,
+                                                   part_code=part, mode=mode)
+                    if r.get("top_differences"):
+                        spec.append({"kind": "compare", "reason": reason,
+                                     "part_code": part, "mode": mode})
+                        return spec
+    return spec
+
+
+def render_answer_charts(spec, data, T):
+    """decide_charts가 만든 정보를 실제 차트로 그립니다."""
+    if not spec:
         return
 
-    if question == STEP1_QUESTION:
-        render_chart_card(make_defect_chart(daily_rate))
+    if spec[0].get("kind") == "overview":
+        render_kpi_row(data, T)
+        daily = get_daily_defect_rate(data)
+        render_chart_row([make_production_fig(daily, T), make_defect_rate_fig(daily, T)])
+        render_chart_row([make_reason_fig(data, T),
+                          make_part_fig(data, T),
+                          make_side_fig(data, T)])
         return
 
-    if question == STEP2_QUESTION:
-        compare = f.compare_normal_vs_defect(data, "가스", part_code="CN7", mode="고속")
-        var_fig = make_variable_compare_fig(compare)
-        mode_info = f.detect_operating_modes(data, "CN7")
-        mode_fig = make_mode_compare_fig(mode_info)
+    figs = []
+    for item in spec:
+        kind = item.get("kind")
+        if kind == "trend":
+            figs.append(make_defect_rate_fig(get_daily_defect_rate(data), T))
+        elif kind == "mode":
+            figs.append(make_mode_compare_fig(
+                f.detect_operating_modes(data, item["part_code"]), T))
+        elif kind == "compare":
+            figs.append(make_variable_compare_fig(
+                f.compare_normal_vs_defect(data, item["reason"],
+                                           part_code=item["part_code"],
+                                           mode=item.get("mode")), T))
 
-        figs = [fig for fig in (var_fig, mode_fig) if fig is not None]
-        if not figs:
-            st.info("이 데이터에서는 비교할 만한 표본이 부족해서 그래프를 생략했습니다.")
-            return
+    figs = [fig for fig in figs if fig is not None]
+    if not figs:
+        st.info(T["no_sample"])
+        return
+    if len(figs) == 1:
+        render_chart_card(figs[0])
+    else:
         render_chart_row(figs)
 
 
+# ---------------------------------------------------------------------
+# 예시 질문 버튼
+# ---------------------------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+st.write(T["examples"])
+col1, col2, col3, col4 = st.columns(4)
+example_clicked = None
+if col1.button(T["b1"]):
+    example_clicked = T["q1"]
+if col2.button(T["b2"]):
+    example_clicked = T["q2"]
+if col3.button(T["b3"]):
+    example_clicked = T["q3"]
+if col4.button(T["b4"]):
+    # 데이터로 답할 수 없는 질문임을 솔직하게 인정하는 모습을 보여주는 버튼입니다.
+    example_clicked = T["q4"]
+
+# 둘째 줄 — 미성형/RG3는 검증된 조치안이 없는 조합이라, '모른다'를 조치 제안
+# 맥락에서 한 번 더 보여줄 수 있는 버튼입니다.
+# "지금 공정 상황이 어때요?"는 전체 현황을 대시보드로 보여주는 질문입니다.
+col5, col6 = st.columns(2)
+if col5.button(T["b5"]):
+    example_clicked = T["q5"]
+if col6.button(T["b6"]):
+    example_clicked = T["q6"]
+
+# ---------------------------------------------------------------------
+# 대화
+# ---------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
-        if msg["role"] == "assistant" and msg.get("show_chart"):
-            render_answer_charts(msg.get("question"), df)
+        if msg["role"] == "assistant":
+            render_answer_charts(msg.get("charts"), df, T)
 
-user_input = st.chat_input("질문을 입력하세요") or example_clicked
+user_input = st.chat_input(T["input"]) or example_clicked
 
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
@@ -422,16 +672,15 @@ if user_input:
         st.write(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("데이터 확인 중..."):
+        with st.spinner(T["spinner"]):
             history = st.session_state.messages[:-1][-6:]
-            answer = agent.ask(user_input, df, history=history)
+            tools_used = []
+            answer = agent.ask(user_input, df, history=history,
+                               lang=lang, tools_used=tools_used)
+            charts = decide_charts(tools_used, df)
         st.write(answer)
-
-        show_chart = user_input in (STEP1_QUESTION, STEP2_QUESTION, OVERVIEW_QUESTION)
-        if show_chart:
-            render_answer_charts(user_input, df)
+        render_answer_charts(charts, df, T)
 
     st.session_state.messages.append(
-        {"role": "assistant", "content": answer, "show_chart": show_chart,
-         "question": user_input}
+        {"role": "assistant", "content": answer, "charts": charts}
     )
