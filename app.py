@@ -14,7 +14,9 @@ app.py
     결론을 다 까놓으면 그 경험이 죽습니다.
 """
 
+import html
 import json
+import re
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -199,17 +201,24 @@ def axis_style(**overrides):
 # ---------------------------------------------------------------------
 # 사이드바 — 언어 / 업로드 / 초기화
 # ---------------------------------------------------------------------
+# [지원님 작업] 답변을 만드는 동안 언어 토글을 누르면, Streamlit이 진행 중이던 답변
+# 생성을 그 자리에서 중단해버려서 답변이 통째로 사라집니다. 그래서 답변 생성 중에는
+# 언어 토글(과 질문을 새로 보낼 수 있는 다른 버튼들)을 비활성화해 누르지 못하게 막습니다.
+is_generating = st.session_state.get("is_generating", False)
+
 with st.sidebar:
     st.markdown("### Language / 언어")
     # 심사위원이 처음 열었을 때 영어가 보이도록 영어를 기본값으로 둡니다.
     _choice = st.radio("Language", ["English", "한국어"], index=0,
-                       horizontal=True, label_visibility="collapsed")
+                       horizontal=True, label_visibility="collapsed",
+                       disabled=is_generating)
     lang = "en" if _choice == "English" else "ko"
     T = LANG[lang]
 
     st.markdown("### " + T["settings"])
-    uploaded_file = st.file_uploader(T["upload"], type="csv", key="csv_uploader")
-    if st.button(T["reset"]):
+    uploaded_file = st.file_uploader(T["upload"], type="csv", key="csv_uploader",
+                                      disabled=is_generating)
+    if st.button(T["reset"], disabled=is_generating):
         st.session_state.messages = []
         st.rerun()
 
@@ -803,6 +812,44 @@ def render_answer_charts(spec, data, T, key_prefix="chart"):
 
 
 # ---------------------------------------------------------------------
+# 답변 텍스트 렌더링 — 첫 문단(직답)을 크게 강조하고 나머지는 보조 설명으로.
+# [디자인 수정] "한눈에 결과를 못 본다"는 피드백. 지금까지는 결론이든 배경
+# 설명이든 전부 같은 크기 본문으로 쭉 나열돼서, 정작 궁금했던 답을 찾으려면
+# 문단을 다 읽어야 했습니다. AI가 답변 맨 앞에 두는 짧은 직답 문장(예: "네,
+# 11월 4일에 불량이 유독 많았습니다.")을 큼직한 강조 카드로 먼저 보여주고,
+# 나머지 근거/디테일은 그 아래 원래 크기로 붙입니다.
+# ---------------------------------------------------------------------
+_MAX_HEADLINE_LEN = 160
+
+
+def render_chat_answer(text):
+    if not text:
+        return
+    paragraphs = [p for p in text.split("\n\n") if p.strip()]
+    headline, rest = (paragraphs[0], paragraphs[1:]) if paragraphs else (None, [])
+
+    # 첫 "문단"이 목록(-, *, 1.)이거나, 그 안에 줄바꿈이 섞여 있거나(헤더+하위
+    # 불릿이 한 덩어리로 묶인 경우), 너무 길면 "직답 한 줄"이 아니라 이미 본문
+    # 설명일 가능성이 높으므로, 강조하지 않고 원래 방식대로 통짜로 보여줍니다.
+    is_list_like = bool(headline) and re.match(r"^\s*([-*]|\d+[.)])\s", headline)
+    has_internal_break = bool(headline) and "\n" in headline.strip()
+    if (not headline or not rest or is_list_like or has_internal_break
+            or len(headline) > _MAX_HEADLINE_LEN):
+        st.write(text)
+        return
+
+    headline_html = html.escape(headline.strip()).replace("**", "")
+    st.markdown(
+        f'<div style="font-size:1.1rem;font-weight:700;line-height:1.5;'
+        f'color:#ffffff;background:rgba(57,135,229,0.12);'
+        f'border-left:4px solid {COLOR_BLUE};border-radius:8px;'
+        f'padding:12px 16px;margin-bottom:10px;">{headline_html}</div>',
+        unsafe_allow_html=True,
+    )
+    st.write("\n\n".join(rest))
+
+
+# ---------------------------------------------------------------------
 # 예시 질문 버튼
 # ---------------------------------------------------------------------
 if "messages" not in st.session_state:
@@ -815,13 +862,13 @@ st.divider()
 st.write(T["examples"])
 col1, col2, col3, col4 = st.columns(4)
 example_clicked = None
-if col1.button(T["b1"]):
+if col1.button(T["b1"], disabled=is_generating):
     example_clicked = T["q1"]
-if col2.button(T["b2"]):
+if col2.button(T["b2"], disabled=is_generating):
     example_clicked = T["q2"]
-if col3.button(T["b3"]):
+if col3.button(T["b3"], disabled=is_generating):
     example_clicked = T["q3"]
-if col4.button(T["b4"]):
+if col4.button(T["b4"], disabled=is_generating):
     # 데이터로 답할 수 없는 질문임을 솔직하게 인정하는 모습을 보여주는 버튼입니다.
     example_clicked = T["q4"]
 
@@ -829,43 +876,70 @@ if col4.button(T["b4"]):
 # 맥락에서 한 번 더 보여줄 수 있는 버튼입니다.
 # "지금 공정 상황이 어때요?"는 전체 현황을 대시보드로 보여주는 질문입니다.
 col5, col6 = st.columns(2)
-if col5.button(T["b5"]):
+if col5.button(T["b5"], disabled=is_generating):
     example_clicked = T["q5"]
-if col6.button(T["b6"]):
+if col6.button(T["b6"], disabled=is_generating):
     example_clicked = T["q6"]
+
+user_input = st.chat_input(T["input"], disabled=is_generating) or example_clicked
+
+# [지원님 작업] 질문이 들어오면 바로 답변 생성에 들어가지 않고, 우선 "생성 중" 상태만
+# 표시해두고 한 번 다시 그립니다(st.rerun). 이렇게 하면 화면에 disabled=True가
+# 반영된(회색으로 눌리지 않는) 언어 토글이 사용자에게 먼저 보이고, 그다음 실제
+# 답변 생성이 시작됩니다. 그동안은 토글을 눌러도 반응하지 않으니, 답변이
+# 중간에 날아가는 일이 없습니다.
+if user_input and not is_generating:
+    st.session_state.is_generating = True
+    st.session_state.pending_question = user_input
+    st.rerun()
 
 # ---------------------------------------------------------------------
 # 대화
 # ---------------------------------------------------------------------
 for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
-        # [지원님 작업] 답변(assistant)은 질문 당시 한국어·영어 버전을 둘 다
-        # 저장해두고, 지금 켜진 언어 토글에 맞는 쪽을 골라서 보여줍니다. 이렇게
-        # 하면 언어 버튼을 눌렀을 때 과거 답변도 바로 그 언어로 바뀌어 보입니다.
-        # (구버전 세션에서 넘어온 메시지처럼 content_{lang}이 없을 때는
-        #  content로 대체합니다.)
+        # [지원님 작업] 사용자 질문·AI 답변 둘 다 질문 당시 한국어·영어 버전을 함께
+        # 저장해두고, 지금 켜진 언어 토글에 맞는 쪽을 골라서 보여줍니다. 이렇게 하면
+        # 언어 버튼을 눌렀을 때 과거 대화(질문+답변) 전체가 바로 그 언어로 바뀌어
+        # 보입니다. (구버전 세션에서 넘어온 메시지처럼 content_{lang}이 없을 때는
+        # content로 대체합니다.)
+        display_text = msg.get(f"content_{lang}", msg["content"])
         if msg["role"] == "assistant":
-            display_text = msg.get(f"content_{lang}", msg["content"])
+            render_chat_answer(display_text)
         else:
-            display_text = msg["content"]
-        st.write(display_text)
+            st.write(display_text)
         if msg["role"] == "assistant":
             # 메시지 인덱스를 key_prefix로 넘겨서, 같은 차트가 다른 메시지에서
             # 반복돼도 고유한 key를 갖게 합니다.
             render_answer_charts(msg.get("charts"), df, T, key_prefix=f"msg{idx}")
 
-user_input = st.chat_input(T["input"]) or example_clicked
-
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
+# [지원님 작업] 실제 답변 생성은 여기서, pending_question이 있을 때만 진행합니다.
+# 위쪽에서 이미 언어 토글·예시 버튼·업로드 등을 disabled 상태로 그린 뒤라
+# 이 구간이 도는 동안 사용자가 그런 버튼을 눌러도 반응하지 않습니다.
+pending_question = st.session_state.get("pending_question")
+if pending_question:
+    q = pending_question
+    # 질문도 반대 언어로 미리 번역해서 같이 저장합니다.
+    other_lang_q = "en" if lang == "ko" else "ko"
+    translated_q = agent.translate_text(q, other_lang_q)
+    q_content_ko = q if lang == "ko" else translated_q
+    q_content_en = translated_q if lang == "ko" else q
+    # content는 항상 한국어판 기준으로 저장해서, agent.ask에 넘어갈 history가
+    # 시스템 프롬프트(한국어)와 일관된 맥락을 유지하게 합니다.
+    st.session_state.messages.append({
+        "role": "user",
+        "content": q_content_ko,
+        "content_ko": q_content_ko,
+        "content_en": q_content_en,
+    })
     with st.chat_message("user"):
-        st.write(user_input)
+        st.write(q)
 
     with st.chat_message("assistant"):
         with st.spinner(T["spinner"]):
             history = st.session_state.messages[:-1][-6:]
             tools_used, tool_log = [], []
-            answer = agent.ask(user_input, df, history=history,
+            answer = agent.ask(q, df, history=history,
                                lang=lang, tools_used=tools_used, tool_log=tool_log)
             charts = decide_charts(tool_log, df)
 
@@ -876,7 +950,7 @@ if user_input:
             translated = agent.translate_text(answer, other_lang)
             content_ko = answer if lang == "ko" else translated
             content_en = translated if lang == "ko" else answer
-        st.write(answer)
+        render_chat_answer(answer)
         # 이번 턴에 새로 나온 답변이므로, 아직 히스토리에 없는 고유한 key_prefix를 씁니다.
         render_answer_charts(charts, df, T, key_prefix="current")
 
@@ -890,3 +964,9 @@ if user_input:
         "content_en": content_en,
         "charts": charts,
     })
+
+    # 답변이 끝났으니 "생성 중" 상태를 풀고, 화면을 다시 그려서
+    # 언어 토글·버튼을 원래대로(누를 수 있게) 되돌립니다.
+    st.session_state.pending_question = None
+    st.session_state.is_generating = False
+    st.rerun()
