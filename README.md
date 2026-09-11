@@ -49,6 +49,7 @@ When nothing survives these checks, the app says so instead of inventing a cause
   but within the same part and operating mode the two shifts are similar. The night shift simply ran
   more of the parts that always have higher defect rates.
 - When this file is uploaded, the app shows a "synthetic data" warning and the agent says so in its answers.
+- The sidebar has a download button for this file, so anyone can try the upload without their own data.
 
 ## Tech Stack
 
@@ -93,6 +94,9 @@ Built for AI Builders Hackathon 2026
 
 ## Known Limitations
 
+- Uploads must use the same format as the KAMP injection-molding dataset (45 columns, UTF-8, PassOrFail as Y/N,
+  part codes CN7/RG3/SP2/JX1). Other files show what is wrong and the app falls back to the default dataset.
+  Automatic column mapping for other formats is a planned next step.
 - The app may take 30–60 seconds to wake up if it has not been used for a few days (Streamlit Cloud).
 - Action rules and field terms are specific to injection molding.
 - 2,764 rows in the dataset appear to be duplicate records (same timestamp, part and sensor values).
