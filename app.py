@@ -31,7 +31,7 @@ st.set_page_config(page_title="ShopFloor Copilot", page_icon="🏭", layout="wid
 # ---------------------------------------------------------------------
 LANG = {
     "en": {
-        "headline": "🏭 Answers backed by data, not guesswork",
+        "headline": "Answers backed by data, not guesswork",
         "badges": [
             "📊 Every answer backed by real data, with auto-generated charts",
             "🗣️ Ask in plain shop-floor language, no jargon needed",
@@ -88,7 +88,7 @@ LANG = {
         "q6": "How does the process look right now?",
     },
     "ko": {
-        "headline": "🏭 감이 아니라 데이터로 답하는 공정 어시스턴트",
+        "headline": "감이 아니라 데이터로 답하는 공정 어시스턴트",
         "badges": [
             "📊 답변마다 실제 데이터 근거 + 그래프 자동 생성",
             "🗣️ 어려운 용어 없이, 현장에서 쓰는 말 그대로 질문",
@@ -194,8 +194,6 @@ _badge_html = "".join(
 )
 st.markdown(_badge_html, unsafe_allow_html=True)
 
-st.caption(T["caption"])
-
 
 @st.cache_data
 def get_data(source=None):
@@ -293,8 +291,11 @@ if uploaded_file is not None:
 else:
     df = get_data()
 
-# 2020년 데이터를 쓰는 이유를 심사위원이 바로 알 수 있게 기준일을 밝힙니다.
-st.caption(T["ref_date"].format(d=df["date"].max(), n=len(df)))
+# 소개문구 + 기준일을 한 캡션 안에 묶어서 보여줍니다. 예전에는 둘을 따로 된 캡션으로
+# 나눠서 보여줘서, 기준일이 마치 또 하나의 독립된 안내문처럼 붕 떠 보였습니다.
+# (2020년 데이터를 쓰는 이유를 심사위원이 알 수 있게 기준일 자체는 남겨두되,
+#  존재감은 낮춰서 소개문구에 딸린 부가정보처럼 보이게 합니다.)
+st.caption(f"{T['caption']}  \n{T['ref_date'].format(d=df['date'].max(), n=len(df))}")
 
 
 @st.cache_data
@@ -732,6 +733,10 @@ def render_answer_charts(spec, data, T, key_prefix="chart"):
 # ---------------------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+# 소개 영역(제목~기준일)과 예시 질문 사이에 구분선을 넣어서, 설명이 끝나고
+# "이제부터는 실제로 써보는 영역"이라는 게 한눈에 구분되게 합니다.
+st.divider()
 
 st.write(T["examples"])
 col1, col2, col3, col4 = st.columns(4)
