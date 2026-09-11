@@ -138,6 +138,51 @@ def validate_columns(df: pd.DataFrame) -> list:
     return [c for c in REQUIRED_COLUMNS if c not in df.columns]
 
 
+# ---------------------------------------------------------------------
+# [업로드 안내] 업로드한 파일이 이 앱이 읽을 수 있는 형식인지 미리 점검합니다.
+# ---------------------------------------------------------------------
+# 컬럼 이름만 보면 통과하는데 값이 달라서 "조용히 틀리는" 경우가 가장 위험합니다.
+# (예: PassOrFail이 0/1이면 에러 없이 불량이 0건으로 계산됩니다 — 실제로 겪은 버그)
+# 그래서 컬럼뿐 아니라 판정 값·시각·품번까지 확인하고, 무엇이 문제인지 목록으로 돌려줍니다.
+#   blocking=True  : 이대로는 분석하면 안 되는 문제 (앱은 기본 데이터로 돌아갑니다)
+#   blocking=False : 분석은 되지만 알려둘 점
+KNOWN_PART_CODES = ["CN7", "RG3", "SP2", "JX1"]   # PART_CODE_PATTERN과 같은 목록
+KNOWN_REASONS = sorted(set(REASON_ALIASES.values()))
+
+
+def check_upload_format(df: pd.DataFrame) -> list:
+    """업로드 파일의 형식 문제를 [{code, blocking, values}] 목록으로 돌려줍니다. 빈 목록이면 통과."""
+    problems = []
+
+    missing = validate_columns(df)
+    if missing:
+        problems.append({"code": "missing_columns", "blocking": True, "values": missing})
+        return problems   # 컬럼이 없으면 아래 값 점검은 의미가 없습니다
+
+    pass_values = sorted(df["PassOrFail"].dropna().astype(str).str.strip().unique().tolist())
+    wrong = [v for v in pass_values if v not in ("Y", "N")]
+    if wrong:
+        problems.append({"code": "bad_pass_fail", "blocking": True, "values": wrong[:5]})
+
+    ts = pd.to_datetime(df["TimeStamp"], errors="coerce")
+    if ts.isna().mean() > 0.05:
+        bad = df.loc[ts.isna(), "TimeStamp"].astype(str).head(3).tolist()
+        problems.append({"code": "bad_timestamp", "blocking": True, "values": bad})
+
+    parts = df["PART_NAME"].astype(str).str.extract(PART_CODE_PATTERN)[0]
+    if parts.isna().all():
+        examples = df["PART_NAME"].astype(str).drop_duplicates().head(3).tolist()
+        problems.append({"code": "unknown_parts", "blocking": True, "values": examples})
+
+    reasons = df["Reason"].dropna().astype(str).str.strip()
+    unknown = sorted({r for r in reasons if r and _key(r) not in REASON_ALIASES
+                      and r not in KNOWN_REASONS})
+    if unknown:
+        problems.append({"code": "unknown_reasons", "blocking": False, "values": unknown[:5]})
+
+    return problems
+
+
 def load_data(source=None) -> pd.DataFrame:
     """CSV를 불러와서 날짜 타입 등을 정리합니다.
 
@@ -1391,4 +1436,17 @@ if __name__ == "__main__":
         assert shift_demo["overall"]["higher"] == "야간", "합성 데이터는 합산 시 야간이 높아야 함"
         assert shift_demo["verdict"] == "composition", "품번·조건별로는 차이가 없어야 함"
         print(shift_demo["note"])
+
+    # [업로드 안내] 형식 점검 테스트
+    print("\n=== 업로드 형식 점검 테스트 ===")
+    raw = pd.read_csv(DATA_PATH)
+    assert check_upload_format(raw) == [], "기본 데이터는 통과해야 함"
+    bad = raw.drop(columns=["Mold_Temperature_3"])
+    assert check_upload_format(bad)[0]["code"] == "missing_columns"
+    bad = raw.copy(); bad["PassOrFail"] = bad["PassOrFail"].map({"Y": 1, "N": 0})
+    assert [p["code"] for p in check_upload_format(bad)] == ["bad_pass_fail"], "0/1 판정은 막아야 함"
+    bad = raw.copy(); bad["PART_NAME"] = "ABC-100"
+    assert "unknown_parts" in [p["code"] for p in check_upload_format(bad)]
+    bad = raw.copy(); bad.loc[bad["Reason"].notna(), "Reason"] = "Flash"
+    assert check_upload_format(bad) == [{"code": "unknown_reasons", "blocking": False, "values": ["Flash"]}]
     print("모든 테스트 통과")
