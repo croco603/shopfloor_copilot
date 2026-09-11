@@ -36,6 +36,93 @@ SENSOR_COLS = [
 # 예: "CN7 W/S SIDE MLD'G RH" -> "CN7"
 PART_CODE_PATTERN = r"^(CN7|RG3|SP2|JX1)"
 
+# ---------------------------------------------------------------------
+# [수정 F1] AI가 넘기는 이름을 데이터 값으로 통일 — 영어 모드 버그 방지
+# ---------------------------------------------------------------------
+# 영어로 질문하면 AI가 reason="gas", mode="high-speed"처럼 영어로 도구를 부릅니다.
+# 데이터에는 '가스', '고속'으로 적혀 있어서, 변환하지 않으면
+#   - "해당 불량 없음"이 되거나 (가스 조치안이 있는데도 "없음"이라고 답한 버그)
+#   - mode="low-speed"가 '저속'이 아니라서 고속 데이터가 계산되는 조용한 버그가 납니다.
+# 변환은 reason / part_code / mode를 받는 모든 함수의 맨 앞에서 한 번만 합니다.
+# (같은 규칙을 여러 곳에 복사하면 한 곳을 놓칩니다 — 실제로 겪은 버그)
+REASON_ALIASES = {
+    "가스": "가스", "gas": "가스", "gasdefect": "가스", "gasmark": "가스",
+    "gastrap": "가스", "burnmark": "가스",
+    "미성형": "미성형", "shortshot": "미성형", "shortshots": "미성형", "short": "미성형",
+    "shortshotdefect": "미성형", "incompletefill": "미성형", "incompletefilling": "미성형",
+    "초기허용불량": "초기허용불량", "initialtolerancedefect": "초기허용불량",
+    "initialtolerance": "초기허용불량", "initialdefect": "초기허용불량",
+    "startupscrap": "초기허용불량", "startupdefect": "초기허용불량",
+    # 9/11 로컬 버전에 있던 표기도 그대로 받습니다.
+    "gasdefects": "가스", "incompletemolding": "미성형",
+    "initialtolerancedefects": "초기허용불량", "initialallowabledefect": "초기허용불량",
+}
+# "원인을 따로 정하지 않음(전체 불량)"을 뜻하는 표현들
+ALL_WORDS = {"", "all", "any", "none", "null", "total", "both", "defect", "defects",
+             "alldefects", "anydefect", "전체", "불량", "전체불량", "모든불량", "모두"}
+MODE_ALIASES = {
+    "저속": "저속", "low": "저속", "lowspeed": "저속", "slow": "저속", "lowmode": "저속",
+    "고속": "고속", "high": "고속", "highspeed": "고속", "fast": "고속", "highmode": "고속",
+}
+
+
+def _key(text) -> str:
+    """'High-Speed', 'high_speed', 'high speed'를 모두 'highspeed'로 맞춥니다."""
+    return str(text).lower().replace(" ", "").replace("_", "").replace("-", "")
+
+
+def _normalize_reason(reason, df=None):
+    """원인 이름을 데이터 값('가스' 등)으로 바꿉니다. 지정하지 않았으면 None."""
+    if reason is None or _key(reason) in ALL_WORDS:
+        return None
+    raw = str(reason).strip()
+    if df is not None and raw in set(df["Reason"].dropna()):
+        return raw  # 업로드한 데이터에 이미 그 이름이 있으면 그대로 씁니다
+    return REASON_ALIASES.get(_key(raw), raw)
+
+
+def _normalize_part(part_code):
+    if part_code is None or _key(part_code) in ALL_WORDS:
+        return None
+    return str(part_code).strip().upper()
+
+
+def _normalize_mode(mode):
+    """'low-speed' -> '저속'. 모르는 값이면 None(= 조건을 나눠서 둘 다 계산)."""
+    if mode is None or _key(mode) in ALL_WORDS:
+        return None
+    return MODE_ALIASES.get(_key(mode))
+
+
+def _valid_reasons(df) -> list:
+    return sorted(df["Reason"].dropna().unique().tolist())
+
+
+def _reason_error(df, reason):
+    """데이터에 없는 원인 이름이면 에러 dict를, 괜찮으면 None을 돌려줍니다.
+    에러에 '쓸 수 있는 값'을 같이 넣어야 AI가 이유를 지어내지 않고 다시 호출합니다.
+    """
+    valid = _valid_reasons(df)
+    if reason is None or reason in valid:
+        return None
+    return {
+        "error": f"'{reason}'는 데이터에 없는 불량 원인 이름입니다.",
+        "valid_reasons": valid,
+        "available_reasons": valid,   # 9/11 로컬 버전과 같은 키 (호환용)
+        "hint": ("데이터에 문제가 있다는 뜻이 아닙니다. valid_reasons 중 하나로 다시 호출하거나, "
+                 "reason을 비워서 원인별 결과를 모두 받으세요."),
+    }
+
+
+# ---------------------------------------------------------------------
+# [수정 F2] 중복 기록 처리 여부 (팀 결정 전까지 False)
+# ---------------------------------------------------------------------
+# 기본 데이터에는 _id만 다르고 나머지가 전부 같은 행이 2,764개 있습니다.
+# (CN7의 10/27·10/29·10/30·11/03이 하루치씩 통째로 두 번 저장됨)
+# True로 바꾸면 중복을 빼고 분석합니다. 이때 71건·0.89% 같은 건수 숫자가
+# 60건·1.15%로 바뀌므로, 프롬프트·ACTION_RULES·발표자료 숫자도 함께 고쳐야 합니다.
+DROP_DUPLICATE_ROWS = False
+
 # 업로드된 파일에 반드시 있어야 하는 컬럼들.
 # 이 중 하나라도 없으면 이후 분석 함수들이 KeyError로 앱을 죽입니다.
 REQUIRED_COLUMNS = ["TimeStamp", "PassOrFail", "PART_NAME", "Reason"] + SENSOR_COLS
@@ -69,6 +156,9 @@ def load_data(source=None) -> pd.DataFrame:
     if missing:
         raise ValueError(f"필요한 컬럼이 없습니다: {', '.join(missing[:5])}")
 
+    if DROP_DUPLICATE_ROWS:
+        df = df[~df.drop(columns=["_id"], errors="ignore").duplicated()].reset_index(drop=True)
+
     df["TimeStamp"] = pd.to_datetime(df["TimeStamp"])
     df["date"] = df["TimeStamp"].dt.date
     # 품번 코드(CN7/RG3 등)를 미리 뽑아둡니다. 품번별 비교에 사용합니다.
@@ -78,77 +168,74 @@ def load_data(source=None) -> pd.DataFrame:
     return df
 
 
-# 불량 사유의 영어·다른 표기 -> 데이터에 실제로 들어있는 한국어 값
-# (영어 모드에서 AI가 'gas', 'short shot'으로 부르면 데이터와 매칭되지 않아
-#  "해당 불량이 없다"는 잘못된 답이 나옵니다. 여기서 흡수합니다.)
-REASON_ALIASES = {
-    "가스": "가스",
-    "gas": "가스",
-    "gasdefect": "가스",
-    "gasdefects": "가스",
-    "미성형": "미성형",
-    "shortshot": "미성형",
-    "shortshots": "미성형",
-    "shortshotdefect": "미성형",
-    "incompletemolding": "미성형",
-    "초기허용불량": "초기허용불량",
-    "initialtolerancedefect": "초기허용불량",
-    "initialtolerancedefects": "초기허용불량",
-    "initialallowabledefect": "초기허용불량",
-    "initialdefect": "초기허용불량",
-}
-
-
-def _normalize_reason(reason):
-    """'gas', 'Short Shot', '미성형' 등을 데이터의 실제 값으로 맞춥니다."""
-    if not reason:
-        return reason
-    key = str(reason).lower().replace(" ", "").replace("_", "").replace("-", "")
-    return REASON_ALIASES.get(key, reason)
-
-
 def list_part_codes(df: pd.DataFrame, reason: str = None) -> dict:
     """분석에 쓸 수 있는 품번 목록과 각 품번의 불량 건수·불량률을 알려줍니다.
     agent가 '어떤 품번으로 비교할지' 정할 때 참고합니다.
+
+    [수정 F3]
+    - reason을 영어로 받아도 동작합니다.
+    - 좌우(LH/RH)를 품번·운전 조건별로도 나눕니다. 전체 합산만 주면
+      "모든 품번에서 RH가 높다"는 틀린 말이 나옵니다. (RG3 저속은 LH가 더 높음)
+    - 생산량이 적은 품번(JX1·SP2는 2개)은 불량률로 판단하지 말라고 표시합니다.
     """
-    reason = _normalize_reason(reason)
-    rows = []
-    for code, g in df.groupby("part_code"):
-        n_defect = (g["Reason"] == reason).sum() if reason else (g["PassOrFail"] == "N").sum()
-        total = len(g)
-        rows.append({
-            "part_code": code,
+    reason = _normalize_reason(reason, df)
+    err = _reason_error(df, reason)
+    if err:
+        return err
+
+    def _row(g, **keys):
+        is_target = (g["Reason"] == reason) if reason else (g["PassOrFail"] == "N")
+        total, n_defect = len(g), int(is_target.sum())
+        row = dict(keys)
+        row.update({
             "total": total,
-            "n_defect": int(n_defect),
-            # 건수만 보면 생산량이 많은 품번이 항상 1위로 보입니다.
-            # (예: CN7은 불량 39건, RG3는 32건이지만, 불량률은 RG3가 2.55%로
-            #  CN7 0.58%보다 4배 이상 높습니다. 생산량이 6,736 vs 1,256이라
-            #  건수만 비교하면 반대로 읽힙니다.)
-            # 그래서 "먼저 봐야 할 품번"은 건수가 아니라 불량률로 정렬합니다.
+            "n_defect": n_defect,
             "defect_rate_pct": round(n_defect / total * 100, 2) if total else 0.0,
         })
+        if total < LOW_SAMPLE_LIMIT:
+            row["low_volume"] = f"생산 {total}개뿐이라 불량률로 판단할 수 없습니다."
+        return row
+
+    # 건수만 보면 생산량이 많은 품번이 항상 1위로 보입니다.
+    # (CN7 불량 39건, RG3 32건이지만 불량률은 RG3 2.55%로 CN7 0.58%의 4배 이상)
+    # 그래서 "먼저 봐야 할 품번"은 건수가 아니라 불량률로 정렬합니다.
+    rows = [_row(g, part_code=code) for code, g in df.groupby("part_code")]
     rows.sort(key=lambda r: r["defect_rate_pct"], reverse=True)
 
-    # 좌우(LH/RH) 구분이 있으면 그것도 함께 알려줍니다.
-    by_side = []
+    by_side, by_part_side = [], []
     if "side" in df.columns and df["side"].notna().any():
-        for s, g in df.dropna(subset=["side"]).groupby("side"):
-            n_d = (g["Reason"] == reason).sum() if reason else (g["PassOrFail"] == "N").sum()
-            by_side.append({
-                "side": s,
-                "total": len(g),
-                "n_defect": int(n_d),
-                "defect_rate_pct": round(n_d / len(g) * 100, 2) if len(g) else 0.0,
-            })
+        sided = df.dropna(subset=["side"])
+        by_side = [_row(g, side=s) for s, g in sided.groupby("side")]
         by_side.sort(key=lambda r: r["defect_rate_pct"], reverse=True)
+
+        for code, g in sided.groupby("part_code"):
+            # LH·RH가 같은 시각에 함께 기록되면 한 번 사출(같은 샷)에서 나온 한 쌍입니다.
+            # 이때 두 제품의 센서값은 똑같으므로, 좌우 차이는 센서값으로 설명할 수 없습니다.
+            both = g.groupby("TimeStamp")["side"].nunique()
+            paired = bool(len(both) and (both == 2).mean() >= 0.9)
+            info = detect_operating_modes(df, code)
+            if info.get("has_modes"):
+                col, thr = info["split_variable"], info["threshold"]
+                groups = [("저속", g[g[col] < thr]), ("고속", g[g[col] >= thr])]
+            else:
+                groups = [(None, g)]
+            for m, sub in groups:
+                for s, gg in sub.groupby("side"):
+                    r = _row(gg, part_code=code, mode=m, side=s)
+                    r["paired_shots"] = paired
+                    by_part_side.append(r)
 
     return {
         "reason": reason,
         "parts": rows,
         "by_side": by_side,
+        "by_part_side": by_part_side,
         "note": ("defect_rate_pct(불량률) 기준으로 정렬했습니다. n_defect(건수)만 보고 "
-                 "우선순위를 판단하지 마세요 — 생산량이 많은 품번은 건수만 많아 보일 수 있습니다. "
-                 "by_side는 같은 품번의 좌우(LH/RH) 구분입니다."),
+                 "우선순위를 판단하지 마세요. low_volume이 있는 품번은 불량률을 말하지 마세요. "
+                 "by_side는 모든 품번을 합친 값이라 품번·조건마다 방향이 뒤집힐 수 있습니다. "
+                 "좌우를 말할 때는 by_part_side를 확인하고 '모든 품번에서'라고 일반화하지 마세요. "
+                 "paired_shots=true이면 LH·RH가 같은 샷에서 나와 센서값이 같습니다. "
+                 "그 좌우 차이는 설비 설정값으로 설명할 수 없고, 금형의 좌우 캐비티 쪽이 확인 대상입니다."),
     }
 
 
@@ -177,6 +264,8 @@ def get_worst_day(df: pd.DataFrame, days: int = None, top_n: int = 5) -> dict:
         fail=lambda x: (x == "N").sum(),
     )
     daily["fail_rate_pct"] = (daily["fail"] / daily["total"] * 100).round(2)
+    # [수정 F4] 추세 질문용 날짜순 표. (불량률순 표로 추세를 설명하면 순서가 뒤죽박죽이 됩니다)
+    in_date_order = daily.reset_index().to_dict(orient="records")
     daily = daily.sort_values("fail_rate_pct", ascending=False)
 
     top = daily.head(top_n).reset_index()
@@ -207,8 +296,11 @@ def get_worst_day(df: pd.DataFrame, days: int = None, top_n: int = 5) -> dict:
         "hint": ("이 데이터의 마지막 생산일은 " + str(reference_date) + "입니다. "
                  "'오늘'이나 '이번 주'는 이 날짜를 기준으로 해석하며, 답변할 때 "
                  "기준일을 함께 밝히세요. 불량률이 높은 날은 특정 품번이나 운전 조건만 "
-                 "돌린 날일 수 있으니 worst_day_production을 확인하세요."),
+                 "돌린 날일 수 있으니 worst_day_production을 확인하세요. "
+                 "추세를 물으면 daily_in_date_order를 날짜순으로 설명하고, "
+                 "생산량(total)이 30개 미만인 날의 불량률은 판단 근거로 쓰지 마세요."),
         "table": top.to_dict(orient="records"),
+        "daily_in_date_order": in_date_order,
     }
 
 
@@ -230,6 +322,59 @@ MIN_ABS_Z = 0.5          # 표준편차 대비 이보다 작게 움직였으면 
 #     (실제로 이 두 조건의 불량률은 0.05% vs 1.50%로 30배 차이납니다.)
 MIN_MODE_RATIO = 0.03   # 한쪽 조건이 전체의 3% 이상이면 별개 조건으로 봅니다
 MIN_MODE_COUNT = 30     # 다만 건수 자체가 이보다 적으면 노이즈로 봅니다
+
+
+# ---------------------------------------------------------------------
+# [수정 F5] 시간 교란 안전장치 — "그날이 원래 그랬던 것"을 걸러냅니다
+# ---------------------------------------------------------------------
+# CN7 가스 불량 13건은 전부 10/16 새벽 36분 사이에 났습니다.
+# 그날은 정상 제품도 금형온도가 25.0/27.6℃로 높았습니다.
+# 다른 날짜의 정상 제품과 섞어 비교하면 "불량일 때 금형온도가 높다"처럼 보이지만,
+# 같은 날 정상 제품과 비교하면 차이가 사라집니다. (품번 → 운전 조건에 이은 세 번째 착시)
+MIN_SAME_DAY_NORMAL = 30   # 같은 날 정상 제품이 이보다 적으면 같은 날 비교를 하지 않습니다
+
+
+def _defect_timing(target: pd.DataFrame) -> dict:
+    """불량이 언제 났는지 요약합니다. 짧은 시간에 몰려 있으면 경고를 붙입니다."""
+    if len(target) == 0:
+        return {}
+    counts = target["date"].value_counts()
+    first, last = target["TimeStamp"].min(), target["TimeStamp"].max()
+    concentrated = bool(counts.iloc[0] / len(target) >= 0.8)
+    info = {
+        "n_dates": int(len(counts)),
+        "dates": [str(d) for d in sorted(counts.index)][:5],
+        "first": str(first),
+        "last": str(last),
+        "concentrated": concentrated,
+    }
+    if concentrated:
+        top = target[target["date"] == counts.index[0]]
+        minutes = round((top["TimeStamp"].max() - top["TimeStamp"].min()).total_seconds() / 60)
+        info["warning"] = (
+            f"불량 {len(target)}건 중 {int(counts.iloc[0])}건이 {counts.index[0]} 하루"
+            f"({minutes}분 사이)에 몰려 있습니다. same_day_check에서 차이가 사라지면 "
+            "그 값은 불량의 원인이 아니라 '그날의 상태'일 수 있으니 원인으로 단정하지 마세요.")
+    return info
+
+
+def _same_day_check(target: pd.DataFrame, normal: pd.DataFrame, col: str) -> dict:
+    """불량이 난 날짜의 정상 제품하고만 다시 비교해서, 차이가 남는지 확인합니다."""
+    same = normal[normal["date"].isin(target["date"].unique())]
+    if len(same) < MIN_SAME_DAY_NORMAL:
+        return {"checked": False, "n_same_day_normal": len(same)}
+    m, sd, t = same[col].mean(), same[col].std(), target[col].mean()
+    pct = abs(t - m) / abs(m) * 100 if m else 0.0
+    if sd and sd > 0:
+        survives = pct >= MIN_PCT_DIFF and abs((t - m) / sd) >= MIN_ABS_Z
+    else:
+        survives = pct >= MIN_PCT_DIFF
+    return {
+        "checked": True,
+        "n_same_day_normal": len(same),
+        "same_day_normal_mean": round(float(m), 2),
+        "survives_same_day": bool(survives),
+    }
 
 
 def _find_mode_threshold(s: pd.Series, min_gap_ratio: float = 0.3):
@@ -328,7 +473,7 @@ def _apply_mode(df: pd.DataFrame, part_code: str, mode: str):
 def _compare_within(sub: pd.DataFrame, reason: str, top_n: int) -> dict:
     """하나의 품번 안에서만 불량군과 정상군을 비교하는 내부 함수."""
     normal = sub[sub["PassOrFail"] == "Y"]
-    target = sub[sub["Reason"] == reason]
+    target = sub[sub["Reason"] == reason] if reason else sub[sub["PassOrFail"] == "N"]
 
     if len(target) < MIN_DEFECT_SAMPLES:
         return {
@@ -365,6 +510,7 @@ def _compare_within(sub: pd.DataFrame, reason: str, top_n: int) -> dict:
         })
 
     rows.sort(key=lambda r: abs(r["z_score"]), reverse=True)
+    timing = _defect_timing(target)
 
     if not rows:
         return {
@@ -372,18 +518,34 @@ def _compare_within(sub: pd.DataFrame, reason: str, top_n: int) -> dict:
             "n_normal": len(normal),
             "skipped": False,
             "top_differences": [],
+            "defect_timing": timing,
             "note": ("정상 제품과 뚜렷하게 다른 값이 발견되지 않았습니다. "
                      "이 데이터에 없는 요인(원료, 금형 상태 등)일 수 있습니다."),
         }
 
-    return {
+    rows = rows[:top_n]
+    # [수정 F5] 상위 차이마다 "같은 날 정상 제품과 비교해도 차이가 남는지" 붙입니다.
+    for r in rows:
+        r["same_day_check"] = _same_day_check(target, normal, r["variable"])
+    vanished = [r["variable"] for r in rows
+                if r["same_day_check"].get("checked")
+                and not r["same_day_check"]["survives_same_day"]]
+
+    result = {
         "n_defect": len(target),
         "n_normal": len(normal),
         "skipped": False,
         # 표본이 적으면 "확정"이 아니라 "우선 확인 대상"으로 말하게 하는 신호
         "low_sample_warning": len(target) < LOW_SAMPLE_LIMIT,
-        "top_differences": rows[:top_n],
+        "top_differences": rows,
+        "defect_timing": timing,
     }
+    if vanished:
+        result["same_day_note"] = (
+            f"{', '.join(vanished)}: 불량이 난 날의 정상 제품과 비교하면 차이가 사라집니다. "
+            "이 값은 원인이라기보다 그날의 상태일 수 있으므로 '원인'이 아니라 "
+            "'그날 함께 달랐던 값'이라고 표현하세요.")
+    return result
 
 
 def _compare_part(df: pd.DataFrame, part_code: str, reason: str, top_n: int) -> dict:
@@ -419,12 +581,24 @@ def compare_normal_vs_defect(df: pd.DataFrame, reason: str, part_code: str = Non
               (CN7 스크류 회전수는 29 아니면 292이고, 평균 124.7은 존재하지 않는 값입니다.)
 
     인자를 생략하면 그 단계를 나누어 전부 돌려줍니다.
+
+    [수정 F6] reason을 영어로 받아도 되고, 생략하면 원인별로 나누어 전부 비교합니다.
+    (원인을 섞으면 서로 반대 방향의 차이가 상쇄되어 "차이 없음"처럼 보입니다.)
     """
-    reason = _normalize_reason(reason)
-    if reason not in df["Reason"].dropna().unique():
-        return {"error": f"'{reason}' 원인에 해당하는 데이터가 없습니다.",
-                "available_reasons": sorted(df["Reason"].dropna().unique().tolist()),
-                "n_defect": 0}
+    reason = _normalize_reason(reason, df)
+    err = _reason_error(df, reason)
+    if err:
+        return err
+    part_code, mode = _normalize_part(part_code), _normalize_mode(mode)
+
+    if reason is None:
+        return {
+            "reason": None,
+            "note": ("불량 원인을 지정하지 않아 원인별로 나누어 비교했습니다. "
+                     "원인마다 결과가 다르니 섞어서 결론 내리지 마세요."),
+            "by_reason": {r: compare_normal_vs_defect(df, r, part_code, mode, top_n=3)
+                          for r in _valid_reasons(df)},
+        }
 
     # 품번 지정이 없으면 품번별로 나눠서 전부 비교
     # (각 품번 안에 운전 조건이 갈리면 그것까지 나눕니다)
@@ -518,6 +692,12 @@ def get_recent_defects(df: pd.DataFrame, n: int = 5) -> dict:
     if len(fails) == 0:
         return {"error": "불량 데이터가 없습니다.", "defects": []}
 
+    # [수정 F7] 이 데이터에서의 '지금'을 함께 알려줍니다.
+    # 없으면 AI가 가장 최근 불량 시각(11/04 05:33)을 '지금'으로 착각해
+    # "지난 1시간 동안"이라고 말합니다. (실제 기준일은 11/06)
+    ref_date = df["date"].max()
+    ref_day = df[df["date"] == ref_date]
+
     items = []
     for _, row in fails.iterrows():
         pc = row["part_code"]
@@ -550,10 +730,18 @@ def get_recent_defects(df: pd.DataFrame, n: int = 5) -> dict:
             "part_code": pc,
             "part_name": row["PART_NAME"],
             "reason": row["Reason"] if pd.notna(row["Reason"]) else "사유 미기재",
+            "days_before_reference": (ref_date - row["date"]).days,
             "notable_values": outliers[:2],
         })
 
     return {
+        "reference_date": str(ref_date),
+        "last_record_time": str(df["TimeStamp"].max()),
+        "reference_day_production": len(ref_day),
+        "reference_day_defects": int((ref_day["PassOrFail"] == "N").sum()),
+        "time_hint": ("데이터의 '지금'은 last_record_time입니다. 불량 시각을 '지금', '방금', "
+                      "'지난 1시간'으로 표현하지 말고 기준일로부터 며칠 전인지 밝히세요. "
+                      "기준일(reference_date)에 불량이 0건이면 그 사실을 먼저 말하세요."),
         "note": "각 건은 같은 품번·같은 운전 조건의 정상 제품과 비교한 결과입니다.",
         "caution": "한 건만으로는 원인을 단정할 수 없습니다. 확인해볼 값으로만 제시하세요.",
         "defects": items,
@@ -571,10 +759,16 @@ VARIABLE_ALIASES = {
     "충전시간": ["Filling_Time"],
     "사출압력": ["Max_Injection_Pressure"],
     "보압": ["Max_Switch_Over_Pressure"],
+    "전환압력": ["Max_Switch_Over_Pressure"],
     "배압": ["Max_Back_Pressure", "Average_Back_Pressure"],
-    "금형온도": ["Mold_Temperature_1", "Mold_Temperature_2",
-             "Mold_Temperature_3", "Mold_Temperature_4"],
-    "배럴온도": [f"Barrel_Temperature_{i}" for i in range(1, 8)],
+    # [수정 F8] 금형온도 1·2번은 전부 0, 배럴온도 7번은 거의 0이라 뺐습니다. (의미 없는 값이 섞이면 AI가 헷갈립니다)
+    "금형온도": ["Mold_Temperature_3", "Mold_Temperature_4"],
+    "배럴온도": [f"Barrel_Temperature_{i}" for i in range(1, 7)],
+    # "압력이랑 온도 중에 뭐가 문제야?" 같은 묶음 질문용
+    "압력": ["Max_Injection_Pressure", "Max_Switch_Over_Pressure",
+           "Max_Back_Pressure", "Average_Back_Pressure"],
+    "온도": ["Mold_Temperature_3", "Mold_Temperature_4", "Hopper_Temperature"]
+          + [f"Barrel_Temperature_{i}" for i in range(1, 7)],
     "호퍼온도": ["Hopper_Temperature"],
     "스크류회전수": ["Max_Screw_RPM", "Average_Screw_RPM"],
     "사이클타임": ["Cycle_Time"],
@@ -588,13 +782,16 @@ VARIABLE_ALIASES = {
     "fillingtime": ["Filling_Time"],
     "injectionpressure": ["Max_Injection_Pressure"],
     "holdingpressure": ["Max_Switch_Over_Pressure"],
+    "switchoverpressure": ["Max_Switch_Over_Pressure"],
     "backpressure": ["Max_Back_Pressure", "Average_Back_Pressure"],
-    "moldtemperature": ["Mold_Temperature_1", "Mold_Temperature_2",
-                        "Mold_Temperature_3", "Mold_Temperature_4"],
-    "moldtemp": ["Mold_Temperature_1", "Mold_Temperature_2",
-                 "Mold_Temperature_3", "Mold_Temperature_4"],
-    "barreltemperature": [f"Barrel_Temperature_{i}" for i in range(1, 8)],
-    "barreltemp": [f"Barrel_Temperature_{i}" for i in range(1, 8)],
+    "moldtemperature": ["Mold_Temperature_3", "Mold_Temperature_4"],
+    "moldtemp": ["Mold_Temperature_3", "Mold_Temperature_4"],
+    "barreltemperature": [f"Barrel_Temperature_{i}" for i in range(1, 7)],
+    "barreltemp": [f"Barrel_Temperature_{i}" for i in range(1, 7)],
+    "pressure": ["Max_Injection_Pressure", "Max_Switch_Over_Pressure",
+                 "Max_Back_Pressure", "Average_Back_Pressure"],
+    "temperature": ["Mold_Temperature_3", "Mold_Temperature_4", "Hopper_Temperature"]
+                   + [f"Barrel_Temperature_{i}" for i in range(1, 7)],
     "hoppertemperature": ["Hopper_Temperature"],
     "screwrpm": ["Max_Screw_RPM", "Average_Screw_RPM"],
     "screwspeed": ["Max_Screw_RPM", "Average_Screw_RPM"],
@@ -602,6 +799,13 @@ VARIABLE_ALIASES = {
     "plasticizingtime": ["Plasticizing_Time"],
     "cushionposition": ["Cushion_Position"],
     "clampclosetime": ["Clamp_Close_Time"],
+}
+
+
+# 값에 대한 주의사항. check_variable 결과에 함께 실어 보냅니다.
+VARIABLE_NOTES = {
+    "Max_Switch_Over_Pressure": ("보압(holding pressure)을 직접 잰 값이 아니라, 사출에서 보압으로 "
+                                 "넘어가는 순간(V/P 전환)의 압력입니다. '보압'이라고 단정하지 마세요."),
 }
 
 
@@ -642,6 +846,7 @@ def _check_variable_within(sub: pd.DataFrame, cols: list, reason: str = None) ->
         t_min, t_max = float(target[c].min()), float(target[c].max())
         overlap = not (t_max < n_min or t_min > n_max)
 
+        meaningful = bool(pct >= MIN_PCT_DIFF and abs(z) >= MIN_ABS_Z)
         results.append({
             "column": c,
             "normal_mean": round(float(m), 2),
@@ -650,7 +855,9 @@ def _check_variable_within(sub: pd.DataFrame, cols: list, reason: str = None) ->
             "defect_range": [round(t_min, 2), round(t_max, 2)],
             "pct_diff": round(pct, 1),
             "z_score": round(z, 2),
-            "meaningful": bool(pct >= MIN_PCT_DIFF and abs(z) >= MIN_ABS_Z),
+            "meaningful": meaningful,
+            # [수정 F5] 차이가 있을 때만 같은 날 비교를 붙입니다.
+            "same_day_check": _same_day_check(target, normal, c) if meaningful else None,
             "ranges_overlap": overlap,
             "overlap_note": (
                 "정상군과 불량군의 관측 범위가 겹칩니다. 특정 숫자를 '이 값 이상이면 "
@@ -662,17 +869,45 @@ def _check_variable_within(sub: pd.DataFrame, cols: list, reason: str = None) ->
         })
 
     any_meaningful = any(r.get("meaningful") for r in results)
+    n_checked = len(results)
+    # 값이 여러 개 묶인 질문("온도")은 결과가 너무 길어지면 AI가 숫자를 헷갈립니다.
+    # 5개 이상이면 차이가 있는 값만 남깁니다.
+    if n_checked > 4:
+        results = [r for r in results if r.get("meaningful")]
     return {
         "n_defect": len(target),
         "n_normal": len(normal),
         "skipped": False,
         "low_sample_warning": len(target) < LOW_SAMPLE_LIMIT,
         "related": any_meaningful,
+        "n_columns_checked": n_checked,
         "conclusion": ("불량군과 뚜렷한 차이가 있습니다." if any_meaningful
                        else "불량군과 정상군 사이에 뚜렷한 차이가 없습니다. "
                             "이 값은 원인으로 보기 어렵습니다."),
+        "defect_timing": _defect_timing(target),
         "details": results,
     }
+
+
+def _collect_findings(tree, ctx=None) -> list:
+    """중첩된 결과(by_reason → by_part → by_mode)에서 '차이가 있는 값'만 한 줄씩 뽑습니다.
+    AI가 긴 결과를 뒤지다 숫자를 잘못 옮기지 않도록 요약표를 따로 줍니다.
+    """
+    ctx = ctx or {}
+    found = []
+    if not isinstance(tree, dict):
+        return found
+    for d in tree.get("details") or []:
+        if d.get("meaningful"):
+            sd = d.get("same_day_check") or {}
+            found.append({**ctx, "n_defect": tree.get("n_defect"), "column": d["column"],
+                          "normal_mean": d["normal_mean"], "defect_mean": d["defect_mean"],
+                          "pct_diff": d["pct_diff"],
+                          "survives_same_day": sd.get("survives_same_day")})
+    for key, label in (("by_reason", "reason"), ("by_part", "part_code"), ("by_mode", "mode")):
+        for k, sub in (tree.get(key) or {}).items():
+            found += _collect_findings(sub, {**ctx, label: k})
+    return found
 
 
 def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
@@ -684,14 +919,39 @@ def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
     주의: 운전 조건이 있는 품번에서 mode를 지정하지 않으면 두 조건이 섞여
     결론이 왜곡될 수 있습니다. 그래서 조건이 있으면 자동으로 나누어 계산합니다.
     """
-    reason = _normalize_reason(reason)
     cols = _ALIAS_LOOKUP.get(_normalize_variable(variable))
     if not cols:
         cols = [c for c in SENSOR_COLS
                 if _normalize_variable(c) == _normalize_variable(variable)]
     if not cols:
         return {"error": f"'{variable}'에 해당하는 값을 찾을 수 없습니다.",
-                "available": list(VARIABLE_ALIASES.keys())}
+                "available": list(VARIABLE_ALIASES.keys()),
+                "hint": ("데이터에 그 값이 없다는 뜻이 아닐 수 있습니다. available 중 가장 가까운 "
+                         "이름으로 다시 호출하세요.")}
+
+    # [수정 F9] 이름 통일 + 원인을 지정하지 않으면 원인별로 나눕니다.
+    # (가스·미성형·초기허용불량을 섞으면 CN7 고속 가스의 금형온도 차이가 묻혀서
+    #  "금형온도는 관계없다"는 틀린 단정이 나왔습니다.)
+    reason = _normalize_reason(reason, df)
+    err = _reason_error(df, reason)
+    if err:
+        return err
+    part_code, mode = _normalize_part(part_code), _normalize_mode(mode)
+    notes = {c: VARIABLE_NOTES[c] for c in cols if c in VARIABLE_NOTES}
+
+    if reason is None:
+        by_reason = {r: check_variable(df, variable, r, part_code, mode)
+                     for r in _valid_reasons(df)}
+        return {
+            "variable": variable,
+            "reason": None,
+            "note": ("불량 원인을 지정하지 않아 원인별로 나누어 계산했습니다. 원인을 섞으면 차이가 "
+                     "묻힐 수 있습니다. findings에 하나라도 있으면 '관계없다'고 단정하지 말고, "
+                     "어느 원인·품번·조건에서 차이가 있었는지 밝히세요."),
+            "findings": _collect_findings({"by_reason": by_reason}),
+            "variable_notes": notes,
+            "by_reason": by_reason,
+        }
 
     # 품번을 지정하지 않았다고 사용자에게 되묻지 않습니다.
     # 분석할 만한 품번(불량이 있는 품번)을 스스로 골라 전부 계산해서 돌려줍니다.
@@ -739,42 +999,79 @@ def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
     return result
 
 
+# [수정 F10] 조치안을 데이터로 다시 확인해서 고쳤습니다.
+#  - ("가스","RG3")의 "스크류 회전수 231 vs 276"은 저속·고속을 섞어서 나온 숫자라 삭제
+#    (조건을 나누면 두 조건 모두 차이 없음). 대신 같은 샷 좌우 비교 결과로 교체
+#  - ("미성형","CN7")은 불량 4건·2건이라 비교 자체가 생략되는 표본이라 삭제
+#  - ("가스","CN7")은 금형온도 차이가 같은 날 정상 제품과 비교하면 사라져서 표현을 낮춤
+#  - 새 조치안을 넣기 전에는 반드시 compare_normal_vs_defect로 같은 날 비교까지 확인할 것
 ACTION_RULES = {
     ("가스", "CN7"): [
-        "먼저 운전 조건 확인 — 고속(스크류 약 292) 조건의 불량률이 1.50%로 "
-        "저속(약 29) 조건 0.05%보다 30배 높음. 가스 불량은 전부 고속 조건에서 발생",
-        "고속 조건에서 금형온도 3·4번 확인 — 불량 시 25.1/27.7℃, 정상 22.1/24.1℃",
-        "금형온도가 오르는 원인(냉각수 유량·온도, 연속 가동 시간) 점검",
+        "가스 불량 13건은 모두 2020-10-16 05:21~05:57(36분)에 몰려 발생 — "
+        "그 시간대 작업 기록(금형 교체, 재가동, 원료 투입)부터 확인",
+        "그날은 정상 제품도 금형온도 3·4번이 약 25.0/27.6℃로 다른 날(약 22~24℃)보다 높았음 — "
+        "불량과 정상의 차이는 아니므로 원인 확정이 아니라 냉각수 유량·온도 기록과 대조해볼 후보",
+        "고속 조건 불량률(1.50%)이 저속(0.05%)보다 높지만, 두 조건을 서로 다른 기간에 돌려서 "
+        "조건 탓인지 시기 탓인지는 이 데이터로 구분할 수 없음",
     ],
     ("가스", "RG3"): [
-        "스크류 평균 회전수 확인 — 불량 시 231, 정상 276으로 낮았음",
-        "가소화가 충분히 이루어지는지 확인",
-    ],
-    ("미성형", "CN7"): [
-        "금형온도 3·4번 확인 (가스 불량과 유사한 패턴)",
-        "고속 조건 여부를 함께 확인",
+        "고속 조건 가스 불량 17건은 모두 RH(오른쪽)에서 발생, 같은 샷에서 나온 LH는 0건 — "
+        "설비 설정값은 좌우가 같으므로 금형 RH 캐비티 쪽(가스 빼기 벤트, 게이트) 점검 후보",
+        "저속 조건 가스 불량 5건은 2020-11-04 05:17~05:33(16분)에 몰려 발생 — 그 시간대 작업 기록 확인",
     ],
     ("초기허용불량", "CN7"): [
-        "초기 생산분 특성일 가능성 — 충전시간이 길고 사출속도가 낮음",
-        "정상 조건 도달 전 생산분이므로 별도 관리 대상으로 분류 검토",
+        "20건 모두 2020-10-27 00:56~01:05(10분) 가동 직후에 발생 — 공정 불량이 아니라 "
+        "시동 초기 폐기분으로 보고 별도 관리",
+        "같은 날 정상 제품보다 충전시간이 길고(약 6.0초 vs 4.5초) 배압이 높음 — 조건이 안정되기 전 생산분",
     ],
 }
 
 
-def suggest_action(df: pd.DataFrame, reason: str, part_code: str = None) -> dict:
+def suggest_action(df: pd.DataFrame, reason: str = None, part_code: str = None) -> dict:
     """원인별 조치안 + 품번별 불량률을 반환합니다.
 
     조치안은 반드시 (원인, 품번) 쌍으로 관리합니다.
     품번마다 원인이 다르기 때문에, 한 품번에서 얻은 조치를
     다른 품번에 그대로 적용하면 위험합니다.
+
+    [수정 F10]
+    - 영어 원인 이름으로 불러도 조치안을 찾습니다. ("gas"로 불러서 "조치안 없음"이 나오던 버그)
+    - 품번별 표에 '이 원인의 불량률'과 '전체 불량률'을 이름을 달리해서 넣습니다.
+      (전체 불량률 2.55%를 AI가 "가스 불량률"이라고 부르던 버그)
     """
-    reason = _normalize_reason(reason)
-    part_rate = df.groupby("part_code").apply(
-        lambda g: round((g["PassOrFail"] == "N").mean() * 100, 2)
-    ).sort_values(ascending=False)
+    reason = _normalize_reason(reason, df)
+    err = _reason_error(df, reason)
+    if err:
+        return err
+    part_code = _normalize_part(part_code)
+
+    if reason is None:
+        return {
+            "reason": None,
+            "note": "원인을 지정하지 않아 원인별 조치안을 모두 돌려줍니다.",
+            "by_reason": {r: suggest_action(df, r, part_code) for r in _valid_reasons(df)},
+        }
+
+    table = []
+    for code, g in df.groupby("part_code"):
+        n_reason = int((g["Reason"] == reason).sum())
+        row = {
+            "part_code": code,
+            "total": len(g),
+            "n_defect_this_reason": n_reason,
+            "this_reason_rate_pct": round(n_reason / len(g) * 100, 2),
+            "overall_defect_rate_pct": round((g["PassOrFail"] == "N").mean() * 100, 2),
+        }
+        if len(g) < LOW_SAMPLE_LIMIT:
+            row["low_volume"] = f"생산 {len(g)}개뿐이라 판단할 수 없습니다. '위험 없음'이라고 말하지 마세요."
+        table.append(row)
+    table.sort(key=lambda r: r["this_reason_rate_pct"], reverse=True)
+    table_note = ("this_reason_rate_pct가 이 원인의 불량률입니다. overall_defect_rate_pct는 모든 원인을 "
+                  "합친 불량률이므로 이 원인의 불량률이라고 부르지 마세요.")
 
     if part_code:
         actions = ACTION_RULES.get((reason, part_code), [])
+        part_row = next((r for r in table if r["part_code"] == part_code), None)
         if not actions:
             return {
                 "reason": reason,
@@ -785,29 +1082,29 @@ def suggest_action(df: pd.DataFrame, reason: str, part_code: str = None) -> dict
                          "아직 없습니다. 조치를 지어내지 말고, 검증된 조치가 없다는 사실을 "
                          "밝힌 뒤 compare_normal_vs_defect 결과를 근거로 "
                          "'확인해볼 값'만 제시하세요."),
-                "part_defect_rate_pct": float(part_rate.get(part_code, 0)),
+                "part_rate": part_row,
+                "table_note": table_note,
             }
         return {
             "reason": reason,
             "part_code": part_code,
             "actions": actions,
             "has_verified_rule": True,
-            "part_defect_rate_pct": float(part_rate.get(part_code, 0)),
+            "part_rate": part_row,
+            "table_note": table_note,
         }
 
     # 품번 지정이 없으면 품번별 조치안을 모두 반환
-    by_part = {
-        code: ACTION_RULES.get((reason, code), [])
-        for code in part_rate.index
-        if ACTION_RULES.get((reason, code))
-    }
+    by_part = {r["part_code"]: ACTION_RULES[(reason, r["part_code"])]
+               for r in table if (reason, r["part_code"]) in ACTION_RULES}
     return {
         "reason": reason,
-        "note": "품번마다 원인이 다르므로 조치도 품번별로 다릅니다.",
+        "note": ("품번마다 원인이 다르므로 조치도 품번별로 다릅니다. "
+                 "actions_by_part에 없는 품번은 검증된 조치안이 없는 것입니다."),
         "actions_by_part": by_part,
-        "part_defect_rate_table": part_rate.reset_index(
-            name="fail_rate_pct"
-        ).to_dict(orient="records"),
+        "has_verified_rule": bool(by_part),
+        "part_rate_table": table,
+        "table_note": table_note,
     }
 
 
@@ -825,6 +1122,12 @@ QUESTION_CATALOG = {
     "day_vs_night": ("X", "전체의 98.6%가 야간(20시~08시) 생산분이라 주야간 비교가 불가능합니다."),
     "equipment_compare": ("X", "설비가 사실상 1대입니다 (7,996건 중 7,992건이 동일 설비)."),
     "predict_next_defect": ("X", "불량이 전체의 0.89%(71건)뿐이라 예측 모델 학습이 불가능합니다."),
+    # [수정 F12] 영어 테스트에서 나온 질문 — 데이터로 확인해서 채움
+    "holding_pressure": ("X", "보압을 직접 측정한 값이 없습니다. V/P 전환 시점의 압력(전환압력)만 있습니다."),
+    "left_right_cause": ("Δ", "LH·RH는 같은 샷에서 나와 센서값이 똑같습니다. 좌우 차이가 있다는 사실은 말할 수 있지만, "
+                              "그 원인은 센서 데이터로 알 수 없고 금형 좌우 캐비티를 직접 점검해야 합니다."),
+    "setting_is_ok": ("Δ", "설정값의 규격(허용 범위)이 데이터에 없어 '괜찮다/아니다'를 판정할 수 없습니다. "
+                           "불량 제품과 정상 제품의 값 차이만 비교할 수 있습니다."),
     # ... 문서에 정리된 나머지 질문들을 이어서 채워 넣으세요.
 }
 
@@ -851,11 +1154,30 @@ if __name__ == "__main__":
     # 간단한 동작 확인용 (터미널에서 python functions.py 로 실행)
     df = load_data()
     print("=== STEP1 테스트 ===")
-    print(get_worst_day(df))
+    print(get_worst_day(df, days=7)["table"])
     print("\n=== STEP2 테스트 (CN7 고속 조건) ===")
     print(detect_operating_modes(df, "CN7")["modes"])
-    print(compare_normal_vs_defect(df, "가스", part_code="CN7", mode="고속")["top_differences"])
+    r = compare_normal_vs_defect(df, "가스", part_code="CN7", mode="고속")
+    print(r["top_differences"])
+    print(r.get("same_day_note"))
     print("\n=== STEP3 테스트 ===")
     print(suggest_action(df, "가스", part_code="CN7"))
     print("\n=== STEP4 테스트 ===")
     print(check_answerable("day_vs_night"))
+
+    # [수정 F11] 영어 모드 회귀 테스트 — 하나라도 실패하면 AssertionError가 납니다.
+    print("\n=== 영어 입력 테스트 ===")
+    assert suggest_action(df, "gas", part_code="cn7")["has_verified_rule"] is True
+    assert suggest_action(df, "Gas")["actions_by_part"], "gas 조치안을 못 찾음"
+    assert "error" not in compare_normal_vs_defect(df, "short shot", part_code="RG3")
+    assert "by_reason" in compare_normal_vs_defect(df, None)
+    assert "error" in compare_normal_vs_defect(df, "scratch")          # 없는 원인은 에러
+    assert "valid_reasons" in compare_normal_vs_defect(df, "scratch")
+    low = compare_normal_vs_defect(df, "gas", part_code="RG3", mode="low-speed")
+    assert low["mode"] == "저속", "low-speed가 저속으로 바뀌지 않음"
+    assert "error" not in check_variable(df, "injection pressure")
+    mt = check_variable(df, "mold temperature")
+    assert mt["findings"], "원인별로 나누면 금형온도 차이가 보여야 함"
+    assert list_part_codes(df, "gas")["parts"][0]["n_defect"] > 0
+    assert "reference_date" in get_recent_defects(df)
+    print("모든 테스트 통과")
