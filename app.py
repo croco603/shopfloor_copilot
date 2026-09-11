@@ -58,18 +58,21 @@ LANG = {
         "unit_case": "{v} cases",
         "t_prod": "Daily production",
         "t_rate": "Daily defect rate (%)",
+        "t_rate_days": "Daily defect rate (%) · last {d} days",
         "t_reason": "Defects by reason",
         "t_part": "Defect rate by part",
         "t_side": "Defect rate by side (LH/RH)",
-        "t_var": "Normal vs defective — key variables",
-        "t_mode": "Defect rate by operating mode (by {v})",
+        "t_var": "Normal vs defective · {ctx}",
+        "t_mode": "{p} · Defect rate by operating mode (by {v})",
         "l_prod": "Production",
         "l_rate": "Defect rate",
         "l_worst": "Peak {v}%",
         "l_worst_name": "Peak",
         "l_normal": "Normal",
         "l_defect": "Defective",
+        "l_same_day": "Normal (same day)",
         "mode_labels": {"저속": "Low speed", "고속": "High speed"},
+        "reason_labels": {"가스": "Gas", "미성형": "Short shot", "초기허용불량": "Startup scrap"},
         "no_sample": "Not enough samples to compare, so the chart is omitted.",
         "b1": "Worst day this week?",
         "b2": "Why gas defects?",
@@ -112,18 +115,21 @@ LANG = {
         "unit_case": "{v}건",
         "t_prod": "일별 생산량",
         "t_rate": "일별 불량률(%)",
+        "t_rate_days": "일별 불량률(%) · 최근 {d}일",
         "t_reason": "불량 원인별 건수",
         "t_part": "품번별 불량률",
         "t_side": "좌우(LH/RH) 불량률",
-        "t_var": "정상 vs 불량 — 주요 변수 비교",
-        "t_mode": "운전조건별 불량률 ({v} 기준)",
+        "t_var": "정상 vs 불량 · {ctx}",
+        "t_mode": "{p} 운전조건별 불량률 ({v} 기준)",
         "l_prod": "생산량",
         "l_rate": "불량률",
         "l_worst": "최고 {v}%",
         "l_worst_name": "최고 불량률",
         "l_normal": "정상",
         "l_defect": "불량",
+        "l_same_day": "정상(같은 날)",
         "mode_labels": {"저속": "저속", "고속": "고속"},
+        "reason_labels": {"가스": "가스", "미성형": "미성형", "초기허용불량": "초기허용불량"},
         "no_sample": "이 데이터에서는 비교할 만한 표본이 부족해서 그래프를 생략했습니다.",
         "b1": "이번 주 불량 많았던 날?",
         "b2": "가스 불량 원인은?",
@@ -377,7 +383,16 @@ def make_production_fig(daily, T):
     return fig
 
 
-def make_defect_rate_fig(daily, T):
+def make_defect_rate_fig(daily, T, days=None):
+    # [수정 P2] "이번 주"(days=7)를 물었는데 전체 기간 차트가 나오던 문제.
+    # functions.get_worst_day와 똑같이 데이터 마지막 날을 '오늘'로 보고 자릅니다.
+    title = T["t_rate"]
+    if days:
+        cutoff = daily["date"].max() - pd.Timedelta(days=int(days) - 1)
+        daily = daily[daily["date"] >= cutoff]
+        title = T["t_rate_days"].format(d=int(days))
+    if daily.empty:
+        return None
     worst_idx = daily["불량률(%)"].idxmax()
     worst_row = daily.loc[worst_idx]
 
@@ -400,7 +415,7 @@ def make_defect_rate_fig(daily, T):
         hovertemplate="%{x|%m/%d}<br>%{y}%<extra></extra>",
     ))
     fig.update_layout(
-        title=T["t_rate"],
+        title=title,
         height=340,
         showlegend=False,
         xaxis=dict(showgrid=False, tickformat="%m/%d"),
@@ -419,7 +434,9 @@ def make_reason_fig(data, T):
     if not rows:
         return None
 
-    reasons = [r["reason"] for r in rows][::-1]
+    # [수정 P3] 영어 화면에서 막대 이름이 '가스'로 나오던 문제
+    labels = T.get("reason_labels", {})
+    reasons = [labels.get(r["reason"], r["reason"]) for r in rows][::-1]
     counts = [r["count"] for r in rows][::-1]
     max_count = max(counts)
     colors = [COLOR_RED if c == max_count else COLOR_MUTED for c in counts]
@@ -506,7 +523,7 @@ def make_side_fig(data, T):
 # ---------------------------------------------------------------------
 # 차트 5. (STEP2 질문 전용) 정상 vs 불량 — 주요 변수 비교
 # ---------------------------------------------------------------------
-def make_variable_compare_fig(compare_result, T, top_n=4):
+def make_variable_compare_fig(compare_result, T, top_n=4, context=""):
     diffs = (compare_result or {}).get("top_differences") or []
     if not diffs:
         return None
@@ -514,6 +531,9 @@ def make_variable_compare_fig(compare_result, T, top_n=4):
     variables = [d["variable"].replace("_", " ") for d in diffs]
     normal_vals = [d["normal_mean"] for d in diffs]
     defect_vals = [d["defect_mean"] for d in diffs]
+    # [수정 P4] 불량이 난 날의 정상 제품 평균도 같이 그립니다.
+    # 이 막대가 불량 막대와 비슷하면 "그날이 원래 그랬다"는 뜻이라 원인으로 볼 수 없습니다.
+    same_day_vals = [(d.get("same_day_check") or {}).get("same_day_normal_mean") for d in diffs]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -522,6 +542,13 @@ def make_variable_compare_fig(compare_result, T, top_n=4):
         text=[str(v) for v in normal_vals], textposition="outside",
         hovertemplate="%{x}: %{y}<extra></extra>",
     ))
+    if any(v is not None for v in same_day_vals):
+        fig.add_trace(go.Bar(
+            x=variables, y=same_day_vals, name=T["l_same_day"],
+            marker_color=COLOR_MUTED,
+            text=["" if v is None else str(v) for v in same_day_vals], textposition="outside",
+            hovertemplate="%{x}: %{y}<extra></extra>",
+        ))
     fig.add_trace(go.Bar(
         x=variables, y=defect_vals, name=T["l_defect"],
         marker_color=COLOR_RED,
@@ -533,7 +560,7 @@ def make_variable_compare_fig(compare_result, T, top_n=4):
         # 그 안에 밀어넣어서 글씨가 겹쳐 보였습니다. 여백을 넉넉히 키우고,
         # 범례는 그 넓어진 여백의 아래쪽(그래프 바로 위)에, 제목은 위쪽에
         # 오도록 확실히 떨어뜨립니다.
-        title=T["t_var"],
+        title=T["t_var"].format(ctx=context),
         barmode="group",
         height=360,
         margin=dict(l=10, r=10, t=80, b=10),
@@ -572,7 +599,8 @@ def make_mode_compare_fig(mode_info, T):
         hovertemplate="%{x}: %{y}%<extra></extra>",
     ))
     fig.update_layout(
-        title=T["t_mode"].format(v=split_var),
+        # [수정 P5] 어느 품번 차트인지 제목에 밝힙니다. (RG3 차트인데 품번이 안 보이던 문제)
+        title=T["t_mode"].format(p=mode_info.get("part_code", ""), v=split_var),
         height=360,
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
@@ -581,44 +609,69 @@ def make_mode_compare_fig(mode_info, T):
     return fig
 
 
-
-daily_rate = get_daily_defect_rate(df)
-
-
 # ---------------------------------------------------------------------
 # 답변 아래 차트 — '실제로 호출된 도구'를 보고 정합니다.
 # 질문 문장을 비교하지 않으므로, 사용자가 직접 타이핑해도 차트가 나옵니다.
 # ---------------------------------------------------------------------
-def decide_charts(tools_used, data):
-    """도구 이름 목록을 보고, 붙일 차트 정보를 리스트로 돌려줍니다."""
-    used = set(tools_used)
+def decide_charts(tool_log, data):
+    """AI가 실제로 호출한 도구와 그 입력값을 보고 붙일 차트를 정합니다.
+
+    [수정 P6]
+    - 에러가 난 호출에는 차트를 붙이지 않습니다.
+      (본문은 "확인하지 못했다"인데 아래에 금형온도 차트가 뜨던 모순)
+    - AI가 분석한 품번·원인·조건 그대로 그립니다.
+      (예전에는 AI가 무엇을 분석했든 항상 가스 → CN7 → 고속 차트를 그렸습니다)
+    - tool_log 대신 옛 형식(도구 이름 문자열 목록)이 와도 동작합니다.
+    """
+    calls = [c if isinstance(c, dict) else {"name": c, "input": {}, "error": False}
+             for c in (tool_log or [])]
+    ok = [c for c in calls if not c.get("error")]
+    used = {c["name"] for c in ok}
     spec = []
 
-    # 현황 요약 질문은 여러 도구를 한꺼번에 부릅니다 -> 대시보드 전체를 보여줍니다.
-    if len(used & {"count_defects_by_reason", "list_part_codes", "get_worst_day"}) >= 2:
+    # 현황 요약 질문은 보통 여러 도구를 한꺼번에 부릅니다 -> 대시보드 전체를 보여줍니다.
+    # [수정 P7] list_part_codes 하나에 품번·불량률·좌우 정보가 다 들어있어서,
+    # AI가 그 도구 하나만으로 "지금 상황이 어때요?" 같은 요약 질문에 답을 끝내는
+    # 경우가 있습니다. 그러면 이 조건(>=2)을 못 채워서 정작 "현재 상황 요약"
+    # 버튼을 눌러도 차트가 하나도 안 뜨는 문제가 있었습니다. list_part_codes만
+    # 단독으로 호출된 경우도 요약 질문으로 보고 대시보드를 보여줍니다.
+    overview_tools = {"count_defects_by_reason", "list_part_codes", "get_worst_day"}
+    if len(used & overview_tools) >= 2 or used == {"list_part_codes"}:
         return [{"kind": "overview"}]
 
-    if "get_worst_day" in used:
-        spec.append({"kind": "trend"})
+    trend = next((c for c in ok if c["name"] == "get_worst_day"), None)
+    if trend:
+        spec.append({"kind": "trend", "days": trend["input"].get("days")})
 
-    wants_cause = "compare_normal_vs_defect" in used
-    if wants_cause or "get_operating_modes" in used:
-        parts = f.list_part_codes(data)["parts"]
-        top = next((p["part_code"] for p in parts if p["n_defect"] >= 5), None)
-        if top:
-            spec.append({"kind": "mode", "part_code": top})
+    # AI가 품번을 지정해서 조건을 본 경우, 그 품번의 운전조건 차트
+    mode_parts = []
+    for c in ok:
+        if c["name"] in ("compare_normal_vs_defect", "get_operating_modes"):
+            pc = f._normalize_part(c["input"].get("part_code"))
+            if pc and pc not in mode_parts:
+                mode_parts.append(pc)
 
-    if wants_cause:
-        # 실제로 차이가 나온 (원인·품번·조건) 조합을 하나만 골라 비교 차트를 붙입니다.
-        for reason in ("가스", "미성형", "초기허용불량"):
-            for part in ("CN7", "RG3"):
-                for mode in ("고속", "저속", None):
-                    r = f.compare_normal_vs_defect(data, reason,
-                                                   part_code=part, mode=mode)
-                    if r.get("top_differences"):
-                        spec.append({"kind": "compare", "reason": reason,
-                                     "part_code": part, "mode": mode})
-                        return spec
+    # AI가 비교한 원인·품번·조건 중 실제로 차이가 나온 조합 하나만 비교 차트로 그립니다.
+    analyzable = [p["part_code"] for p in f.list_part_codes(data)["parts"] if p["n_defect"] >= 5]
+    for c in ok:
+        if c["name"] != "compare_normal_vs_defect":
+            continue
+        reason = f._normalize_reason(c["input"].get("reason"), data)
+        if not reason:
+            continue  # 원인을 섞은 비교는 차트 한 장으로 그리지 않습니다
+        part = f._normalize_part(c["input"].get("part_code"))
+        mode = f._normalize_mode(c["input"].get("mode"))
+        for p in ([part] if part else analyzable):
+            for m in ([mode] if mode else ["고속", "저속", None]):
+                r = f.compare_normal_vs_defect(data, reason, part_code=p, mode=m)
+                if r.get("top_differences"):
+                    spec.append({"kind": "mode", "part_code": p})
+                    spec.append({"kind": "compare", "reason": reason,
+                                 "part_code": p, "mode": m})
+                    return spec
+
+    if mode_parts:
+        spec.append({"kind": "mode", "part_code": mode_parts[0]})
     return spec
 
 
@@ -647,15 +700,22 @@ def render_answer_charts(spec, data, T, key_prefix="chart"):
     for item in spec:
         kind = item.get("kind")
         if kind == "trend":
-            figs.append(make_defect_rate_fig(get_daily_defect_rate(data), T))
+            figs.append(make_defect_rate_fig(get_daily_defect_rate(data), T,
+                                             days=item.get("days")))
         elif kind == "mode":
             figs.append(make_mode_compare_fig(
                 f.detect_operating_modes(data, item["part_code"]), T))
         elif kind == "compare":
+            # 차트 제목에 "CN7 · High speed · Gas"처럼 무엇을 비교했는지 밝힙니다.
+            ctx = " · ".join(x for x in (
+                item["part_code"],
+                T.get("mode_labels", {}).get(item.get("mode"), item.get("mode") or ""),
+                T.get("reason_labels", {}).get(item["reason"], item["reason"]),
+            ) if x)
             figs.append(make_variable_compare_fig(
                 f.compare_normal_vs_defect(data, item["reason"],
                                            part_code=item["part_code"],
-                                           mode=item.get("mode")), T))
+                                           mode=item.get("mode")), T, context=ctx))
 
     figs = [fig for fig in figs if fig is not None]
     if not figs:
@@ -716,10 +776,10 @@ if user_input:
     with st.chat_message("assistant"):
         with st.spinner(T["spinner"]):
             history = st.session_state.messages[:-1][-6:]
-            tools_used = []
+            tools_used, tool_log = [], []
             answer = agent.ask(user_input, df, history=history,
-                               lang=lang, tools_used=tools_used)
-            charts = decide_charts(tools_used, df)
+                               lang=lang, tools_used=tools_used, tool_log=tool_log)
+            charts = decide_charts(tool_log, df)
         st.write(answer)
         # 이번 턴에 새로 나온 답변이므로, 아직 히스토리에 없는 고유한 key_prefix를 씁니다.
         render_answer_charts(charts, df, T, key_prefix="current")
