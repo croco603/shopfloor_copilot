@@ -31,6 +31,12 @@ st.set_page_config(page_title="ShopFloor Copilot", page_icon="🏭", layout="wid
 # ---------------------------------------------------------------------
 LANG = {
     "en": {
+        "headline": "🏭 Answers backed by data, not guesswork",
+        "badges": [
+            "📊 Every answer backed by real data, with auto-generated charts",
+            "🗣️ Ask in plain shop-floor language, no jargon needed",
+            "📁 Upload your own data and get instant analysis",
+        ],
         "caption": "An AI assistant for your injection-molding process data. Ask in plain language and get answers backed by real production data, along with charts. AI can make mistakes — please double-check important information.",
         "ref_date": "Data as of {d} · {n:,} records",
         "settings": "Settings",
@@ -79,6 +85,12 @@ LANG = {
         "q6": "How does the process look right now?",
     },
     "ko": {
+        "headline": "🏭 감이 아니라 데이터로 답하는 공정 어시스턴트",
+        "badges": [
+            "📊 답변마다 실제 데이터 근거 + 그래프 자동 생성",
+            "🗣️ 어려운 용어 없이, 현장에서 쓰는 말 그대로 질문",
+            "📁 내 데이터 업로드해서 바로 분석",
+        ],
         "caption": "사출성형 공정 데이터를 분석하는 AI 어시스턴트입니다. 현장에서 쓰는 말 그대로 물어보면, 실제 생산 데이터를 근거로 답변과 그래프를 함께 보여드려요. AI가 생성한 답변은 부정확할 수 있으니 중요한 내용은 다시 확인해 주세요.",
         "ref_date": "데이터 기준일: {d} · 총 {n:,}건",
         "settings": "설정",
@@ -161,6 +173,15 @@ with st.sidebar:
         st.rerun()
 
 st.title("🏭 ShopFloor Copilot")
+
+# 처음 보는 사람도 "이게 뭐하는 앱인지, 뭐가 좋은지"를 3초 안에 알 수 있게
+# 헤드라인 한 줄 + 핵심 장점 3가지를 배지 카드로 보여줍니다.
+st.markdown(f"#### {T['headline']}")
+_badge_cols = st.columns(3, gap="medium")
+for _col, _badge in zip(_badge_cols, T["badges"]):
+    with _col, st.container(border=True):
+        st.markdown(_badge)
+
 st.caption(T["caption"])
 
 
