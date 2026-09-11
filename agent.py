@@ -209,6 +209,25 @@ TOOLS = [
         },
     },
     {
+        # [주야간] 주간·야간 불량률 비교 도구
+        "name": "compare_shifts",
+        "description": (
+            "주간(08~20시)과 야간(20~08시)의 불량률을 비교한다. "
+            "'야간에 불량이 왜 많아?', '주간이랑 야간 중 어디가 불량률이 높아?' 같은 질문에는 "
+            "추측하지 말고 반드시 이 도구를 먼저 호출한다. "
+            "comparable=false이면 한쪽 교대 생산이 너무 적어 비교할 수 없다는 뜻이다. "
+            "comparable=true이면 overall(전체 합산)과 by_group(같은 품번·조건끼리 비교)을 "
+            "함께 보고 verdict에 따라 답한다."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "part_code": {"type": "string",
+                              "description": "품번 코드(선택). 생략하면 전체 품번."},
+            },
+        },
+    },
+    {
         "name": "check_answerable",
         "description": (
             "질문이 현재 데이터로 답변 가능한지(O), 조건부 가능한지(Δ), 불가능한지(X) 확인한다. "
@@ -260,7 +279,7 @@ SYSTEM_PROMPT = """\
 - 답할 수 없다고 말한 뒤에, 도구 목록에 없는 분석을 대안으로 제시하지 마세요.
   못 하는 것을 할 수 있다고 광고하는 셈이며, 다음 질문에서 바로 들통납니다.
 - 대안을 제시할 때는 반드시 지금 가진 도구로 실제 실행 가능한 것만 말하세요.
-- 특히 주야간 비교, 교대조 비교, 불량 확률 예측, 원료 로트 분석은
+- 특히 작업조(A조/B조) 비교, 불량 확률 예측, 원료 로트 분석은
   이 데이터로 불가능합니다. 절대 제안하지 마세요.
 - suggest_action이 has_verified_rule=false를 돌려주면, 검증된 조치안이 없다는 사실을
   밝히고 "확인해볼 값"만 제시하세요. 조치를 지어내지 마세요.
@@ -316,6 +335,15 @@ SYSTEM_PROMPT = """\
 - defect_timing.concentrated=true이면 "불량 N건이 모두 O월 O일 O분 사이에 몰려 있었다"고 먼저 밝히세요.
 - same_day_check.survives_same_day=false인 값은 '원인'이라고 말하지 마세요.
   "불량이 난 날은 정상 제품도 같은 값이었으므로, 그날의 상태일 뿐 원인으로 확인되지 않았다"고 말하세요.
+
+[주야간 질문 — compare_shifts]
+- 주간·야간 질문에는 반드시 compare_shifts를 호출하세요. 미리 "불가능하다"고 단정하지 마세요.
+- comparable=false이면 reason을 근거로 비교할 수 없다고 답하세요. 야간이 많다/적다고 말하지 마세요.
+- comparable=true이면 전체 합산(overall)만 말하지 말고, 같은 품번·조건끼리 비교한 by_group을 함께 말하세요.
+- verdict가 composition이면 "합쳐서 보면 야간(주간)이 높지만, 같은 품번·조건끼리는 차이가 없고
+  야간(주간)에 불량률이 높은 품번·조건을 더 많이 돌렸기 때문"이라고 composition 숫자로 설명하세요.
+- 어떤 경우에도 "야간이라서 불량이 난다"처럼 교대 자체를 원인으로 단정하지 마세요.
+- synthetic_data=true이면 답변 첫 문장에 "업로드된 합성(시연용) 데이터 기준"이라고 밝히세요.
 
 [오늘·지금]
 - '오늘', '지금'은 데이터의 기준일(reference_date) 기준입니다. 실제 오늘 날짜가 아닙니다.
@@ -380,6 +408,8 @@ LANG_RULE = {
         "\n"
         "[Wording]\n"
         "Part codes (CN7, RG3) stay as they are. Say 'startup scrap' for 초기허용불량.\n"
+        "Say 'day shift' for 주간 and 'night shift' for 야간. If synthetic_data is true,\n"
+        "start the answer by saying the result is based on uploaded synthetic demo data.\n"
         "Copy every number exactly from the tool results."
     ),
 }
@@ -400,6 +430,7 @@ FUNCTION_MAP = {
     "check_variable": lambda df, **kw: f.check_variable(
         df, kw["variable"], reason=kw.get("reason"),
         part_code=kw.get("part_code"), mode=kw.get("mode")),
+    "compare_shifts": lambda df, **kw: f.compare_shifts(df, part_code=kw.get("part_code")),
     "check_answerable": lambda df, **kw: f.check_answerable(kw["question_tag"]),
 }
 
