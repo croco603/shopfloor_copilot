@@ -381,7 +381,12 @@ def make_production_fig(daily, T):
     fig.update_layout(
         title=T["t_prod"],
         height=340,
-        xaxis=dict(showgrid=False, tickformat="%m/%d"),
+        # [버그 수정] 날짜 범위가 좁을 때(예: 최근 7일) plotly가 자동으로 하루보다
+        # 촘촘한 간격(예: 12시간)으로 눈금을 잡아서, tickformat="%m/%d"에는 시간이
+        # 안 보이니까 같은 날짜가 두 번씩 찍혀 보이는 문제가 있었습니다.
+        # dtick을 하루(밀리초 단위 86400000)로 고정해서 항상 하루에 눈금 하나만
+        # 찍히게 합니다.
+        xaxis=dict(showgrid=False, tickformat="%m/%d", dtick=86400000),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
         **CHART_BASE_LAYOUT,
     )
@@ -423,7 +428,9 @@ def make_defect_rate_fig(daily, T, days=None):
         title=title,
         height=340,
         showlegend=False,
-        xaxis=dict(showgrid=False, tickformat="%m/%d"),
+        # [버그 수정] make_production_fig와 같은 이유로, 날짜 범위가 좁은
+        # "최근 N일" 질문에서 같은 날짜가 두 번씩 찍히던 문제를 dtick 고정으로 막습니다.
+        xaxis=dict(showgrid=False, tickformat="%m/%d", dtick=86400000),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
     )
