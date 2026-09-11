@@ -68,6 +68,8 @@ LANG = {
         "examples": "**Example questions**",
         "input": "Ask a question",
         "spinner": "Checking the data...",
+        "gen_error": ("Something went wrong while preparing the answer. "
+                      "Please try asking again."),
         "kpi_total": "Total production",
         "kpi_rate": "Overall defect rate",
         "kpi_reason": "Top defect reason",
@@ -146,6 +148,7 @@ LANG = {
         "examples": "**예시 질문**",
         "input": "질문을 입력하세요",
         "spinner": "데이터 확인 중...",
+        "gen_error": "답변을 만드는 중 문제가 발생했습니다. 다시 질문해 주세요.",
         "kpi_total": "총 생산량",
         "kpi_rate": "전체 불량률",
         "kpi_reason": "최다 불량 원인",
@@ -1085,54 +1088,78 @@ for idx, msg in enumerate(st.session_state.messages):
 pending_question = st.session_state.get("pending_question")
 if pending_question:
     q = pending_question
-    # 질문도 반대 언어로 미리 번역해서 같이 저장합니다.
-    other_lang_q = "en" if lang == "ko" else "ko"
-    translated_q = agent.translate_text(q, other_lang_q)
-    q_content_ko = q if lang == "ko" else translated_q
-    q_content_en = translated_q if lang == "ko" else q
-    # content는 항상 한국어판 기준으로 저장해서, agent.ask에 넘어갈 history가
-    # 시스템 프롬프트(한국어)와 일관된 맥락을 유지하게 합니다.
-    st.session_state.messages.append({
-        "role": "user",
-        "content": q_content_ko,
-        "content_ko": q_content_ko,
-        "content_en": q_content_en,
-    })
-    with st.chat_message("user"):
-        st.write(q)
+    # [버그 수정] agent.ask()/translate_text()가 API 타임아웃 등으로 중간에 실패하면,
+    # 예외가 그대로 터져서 아래쪽 "생성 중 상태 해제" 코드가 실행되지 못하고
+    # is_generating이 True로 영원히 남습니다. 그러면 대화 초기화 버튼까지
+    # disabled=is_generating이라 사용자가 화면의 그 무엇도 누를 수 없는 상태로
+    # 굳어버립니다(새로고침해도 세션이 이어지면 그대로). 그래서 이 구간 전체를
+    # try/except/finally로 감싸서, 무슨 일이 있어도 잠금은 반드시 풀리게 합니다.
+    try:
+        # 질문도 반대 언어로 미리 번역해서 같이 저장합니다. 번역 자체가 실패해도
+        # 질문은 보여줘야 하므로, 실패하면 번역 없이 원문을 그대로 씁니다.
+        other_lang_q = "en" if lang == "ko" else "ko"
+        try:
+            translated_q = agent.translate_text(q, other_lang_q)
+        except Exception:
+            translated_q = q
+        q_content_ko = q if lang == "ko" else translated_q
+        q_content_en = translated_q if lang == "ko" else q
+        # content는 항상 한국어판 기준으로 저장해서, agent.ask에 넘어갈 history가
+        # 시스템 프롬프트(한국어)와 일관된 맥락을 유지하게 합니다.
+        st.session_state.messages.append({
+            "role": "user",
+            "content": q_content_ko,
+            "content_ko": q_content_ko,
+            "content_en": q_content_en,
+        })
+        with st.chat_message("user"):
+            st.write(q)
 
-    with st.chat_message("assistant"):
-        with st.spinner(T["spinner"]):
-            history = st.session_state.messages[:-1][-6:]
-            tools_used, tool_log = [], []
-            answer = agent.ask(q, df, history=history,
-                               lang=lang, tools_used=tools_used, tool_log=tool_log)
-            charts = decide_charts(tool_log, df)
+        with st.chat_message("assistant"):
+            with st.spinner(T["spinner"]):
+                history = st.session_state.messages[:-1][-6:]
+                tools_used, tool_log = [], []
+                answer = agent.ask(q, df, history=history,
+                                   lang=lang, tools_used=tools_used, tool_log=tool_log)
+                charts = decide_charts(tool_log, df)
 
-            # [지원님 작업] 답변이 나오면, 반대 언어 버전도 바로 번역해서 같이
-            # 만들어둡니다. (전체 도구 호출을 다시 하는 게 아니라 완성된 답변
-            # 문장만 가볍게 번역하므로 API 호출이 1번 더 늘어나는 정도입니다.)
-            other_lang = "en" if lang == "ko" else "ko"
-            translated = agent.translate_text(answer, other_lang)
-            content_ko = answer if lang == "ko" else translated
-            content_en = translated if lang == "ko" else answer
-        render_chat_answer(answer)
-        # 이번 턴에 새로 나온 답변이므로, 아직 히스토리에 없는 고유한 key_prefix를 씁니다.
-        render_answer_charts(charts, df, T, key_prefix="current")
+                # [지원님 작업] 답변이 나오면, 반대 언어 버전도 바로 번역해서 같이
+                # 만들어둡니다. (전체 도구 호출을 다시 하는 게 아니라 완성된 답변
+                # 문장만 가볍게 번역하므로 API 호출이 1번 더 늘어나는 정도입니다.)
+                other_lang = "en" if lang == "ko" else "ko"
+                try:
+                    translated = agent.translate_text(answer, other_lang)
+                except Exception:
+                    translated = answer
+                content_ko = answer if lang == "ko" else translated
+                content_en = translated if lang == "ko" else answer
+            render_chat_answer(answer)
+            # 이번 턴에 새로 나온 답변이므로, 아직 히스토리에 없는 고유한 key_prefix를 씁니다.
+            render_answer_charts(charts, df, T, key_prefix="current")
 
-    # content는 항상 한국어판을 기준으로 저장해서, 다음 질문의 history로 넘어갈 때도
-    # 시스템 프롬프트(한국어)와 일관된 맥락을 유지하게 합니다.
-    # content_ko / content_en은 화면 표시용으로, 언어 토글에 따라 골라서 보여줍니다.
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": content_ko,
-        "content_ko": content_ko,
-        "content_en": content_en,
-        "charts": charts,
-    })
-
-    # 답변이 끝났으니 "생성 중" 상태를 풀고, 화면을 다시 그려서
-    # 언어 토글·버튼을 원래대로(누를 수 있게) 되돌립니다.
-    st.session_state.pending_question = None
-    st.session_state.is_generating = False
-    st.rerun()
+        # content는 항상 한국어판을 기준으로 저장해서, 다음 질문의 history로 넘어갈 때도
+        # 시스템 프롬프트(한국어)와 일관된 맥락을 유지하게 합니다.
+        # content_ko / content_en은 화면 표시용으로, 언어 토글에 따라 골라서 보여줍니다.
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": content_ko,
+            "content_ko": content_ko,
+            "content_en": content_en,
+            "charts": charts,
+        })
+    except Exception:
+        # 여기서 보여주는 st.error는 곧이어 실행되는 st.rerun() 때문에 화면에서 바로
+        # 사라지므로, 사용자가 무슨 일이 있었는지 알 수 있도록 대화 기록에도 남깁니다.
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": LANG["ko"]["gen_error"],
+            "content_ko": LANG["ko"]["gen_error"],
+            "content_en": LANG["en"]["gen_error"],
+            "charts": None,
+        })
+    finally:
+        # 성공하든 실패하든 "생성 중" 상태는 반드시 풀고, 화면을 다시 그려서
+        # 언어 토글·버튼을 원래대로(누를 수 있게) 되돌립니다.
+        st.session_state.pending_question = None
+        st.session_state.is_generating = False
+        st.rerun()
