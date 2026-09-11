@@ -31,7 +31,7 @@ st.set_page_config(page_title="ShopFloor Copilot", page_icon="🏭", layout="wid
 # ---------------------------------------------------------------------
 LANG = {
     "en": {
-        "headline": "🏭 Answers backed by data, not guesswork",
+        "headline": "Answers backed by data, not guesswork",
         "badges": [
             "📊 Every answer backed by real data, with auto-generated charts",
             "🗣️ Ask in plain shop-floor language, no jargon needed",
@@ -88,7 +88,7 @@ LANG = {
         "q6": "How does the process look right now?",
     },
     "ko": {
-        "headline": "🏭 감이 아니라 데이터로 답하는 공정 어시스턴트",
+        "headline": "감이 아니라 데이터로 답하는 공정 어시스턴트",
         "badges": [
             "📊 답변마다 실제 데이터 근거 + 그래프 자동 생성",
             "🗣️ 어려운 용어 없이, 현장에서 쓰는 말 그대로 질문",
@@ -194,8 +194,6 @@ _badge_html = "".join(
 )
 st.markdown(_badge_html, unsafe_allow_html=True)
 
-st.caption(T["caption"])
-
 
 @st.cache_data
 def get_data(source=None):
@@ -293,8 +291,11 @@ if uploaded_file is not None:
 else:
     df = get_data()
 
-# 2020년 데이터를 쓰는 이유를 심사위원이 바로 알 수 있게 기준일을 밝힙니다.
-st.caption(T["ref_date"].format(d=df["date"].max(), n=len(df)))
+# 소개문구 + 기준일을 한 캡션 안에 묶어서 보여줍니다. 예전에는 둘을 따로 된 캡션으로
+# 나눠서 보여줘서, 기준일이 마치 또 하나의 독립된 안내문처럼 붕 떠 보였습니다.
+# (2020년 데이터를 쓰는 이유를 심사위원이 알 수 있게 기준일 자체는 남겨두되,
+#  존재감은 낮춰서 소개문구에 딸린 부가정보처럼 보이게 합니다.)
+st.caption(f"{T['caption']}  \n{T['ref_date'].format(d=df['date'].max(), n=len(df))}")
 
 
 @st.cache_data
@@ -631,12 +632,22 @@ def decide_charts(tool_log, data):
 
     # 현황 요약 질문은 보통 여러 도구를 한꺼번에 부릅니다 -> 대시보드 전체를 보여줍니다.
     # [수정 P7] list_part_codes 하나에 품번·불량률·좌우 정보가 다 들어있어서,
-    # AI가 그 도구 하나만으로 "지금 상황이 어때요?" 같은 요약 질문에 답을 끝내는
-    # 경우가 있습니다. 그러면 이 조건(>=2)을 못 채워서 정작 "현재 상황 요약"
-    # 버튼을 눌러도 차트가 하나도 안 뜨는 문제가 있었습니다. list_part_codes만
-    # 단독으로 호출된 경우도 요약 질문으로 보고 대시보드를 보여줍니다.
-    overview_tools = {"count_defects_by_reason", "list_part_codes", "get_worst_day"}
-    if len(used & overview_tools) >= 2 or used == {"list_part_codes"}:
+    # AI가 그 도구를 (get_recent_defects 등 다른 '현황' 도구와 함께, 또는 그
+    # 도구 하나만으로) "지금 상황이 어때요?" 같은 요약 질문에 답을 끝내는
+    # 경우가 있습니다. 처음엔 list_part_codes 단독 호출만 예외로 뒀는데, 실제
+    # 배포본에서는 list_part_codes + get_recent_defects 조합처럼 요약 질문인데도
+    # 두 조건 다 못 채우는 경우가 있어 "현재 상황 요약" 버튼을 눌러도 차트가
+    # 하나도 안 뜨는 문제가 계속 있었습니다.
+    # 그래서 기준을 이렇게 정리합니다: compare_normal_vs_defect나
+    # get_operating_modes처럼 '특정 원인/조건을 콕 집어 분석'하는 도구를 쓰지
+    # 않았다면, list_part_codes를 썼다는 것 자체가 이미 품번별 현황을 종합해서
+    # 답했다는 뜻이므로 요약 질문으로 보고 대시보드를 보여줍니다.
+    overview_tools = {"count_defects_by_reason", "list_part_codes",
+                      "get_worst_day", "get_recent_defects"}
+    narrow_tools = {"compare_normal_vs_defect", "get_operating_modes"}
+    if not (used & narrow_tools) and (
+        len(used & overview_tools) >= 2 or "list_part_codes" in used
+    ):
         return [{"kind": "overview"}]
 
     trend = next((c for c in ok if c["name"] == "get_worst_day"), None)
@@ -732,6 +743,10 @@ def render_answer_charts(spec, data, T, key_prefix="chart"):
 # ---------------------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+# 소개 영역(제목~기준일)과 예시 질문 사이에 구분선을 넣어서, 설명이 끝나고
+# "이제부터는 실제로 써보는 영역"이라는 게 한눈에 구분되게 합니다.
+st.divider()
 
 st.write(T["examples"])
 col1, col2, col3, col4 = st.columns(4)
