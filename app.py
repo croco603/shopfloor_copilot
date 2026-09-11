@@ -37,7 +37,7 @@ LANG = {
         "badges": [
             "📊 Every answer backed by real data, with auto-generated charts",
             "🗣️ Ask in plain shop-floor language, no jargon needed",
-            "📁 Upload your own data and get instant analysis",
+            "📁 Upload injection-molding data in the same format",
         ],
         "caption": "An AI assistant for your injection-molding process data. Ask in plain language and get answers backed by real production data, along with charts. AI can make mistakes — please double-check important information.",
         "ref_date": "Data as of {d} · {n:,} records",
@@ -45,6 +45,22 @@ LANG = {
         "upload": "Upload process data (CSV)",
         "upload_ok": "Analyzing your uploaded data ({n:,} rows)",
         "missing": "Missing required columns: {cols}",
+        # [업로드 안내] 업로드 형식 안내 문구
+        "upload_help": ("CSV in the same format as the KAMP injection-molding dataset "
+                        "(45 columns, UTF-8). Try the sample file below."),
+        "sample_dl": "Download sample CSV (synthetic)",
+        "sample_help": "Synthetic demo data for trying the upload feature. Not real factory data.",
+        "fmt_title": "This file can't be analyzed yet, so the default KAMP dataset is shown instead.",
+        "fmt_scope": ("ShopFloor Copilot currently supports the KAMP injection-molding data format only. "
+                      "Automatic column mapping for other formats is planned."),
+        "fmt_unreadable": "The file could not be read as a CSV. Please save it as UTF-8 CSV.",
+        "fmt_missing_columns": "Missing columns ({n}): {vals}",
+        "fmt_bad_pass_fail": "PassOrFail must be Y or N. Found: {vals}",
+        "fmt_bad_timestamp": "TimeStamp could not be read as date and time. Examples: {vals}",
+        "fmt_unknown_parts": "PART_NAME must start with a known part code ({parts}). Found: {vals}",
+        "fmt_unknown_reasons": ("Unknown defect reasons: {vals}. Analysis still works, "
+                                "but there are no verified action rules for them."),
+        "fmt_required": "Required columns",
         "reset": "Clear conversation",
         "drop": "\U0001F4C2 Drop your CSV file here",
         "drop_alert": "Only CSV files can be uploaded.",
@@ -102,7 +118,7 @@ LANG = {
         "badges": [
             "📊 답변마다 실제 데이터 근거 + 그래프 자동 생성",
             "🗣️ 어려운 용어 없이, 현장에서 쓰는 말 그대로 질문",
-            "📁 내 데이터 업로드해서 바로 분석",
+            "📁 같은 형식의 사출 공정 데이터 업로드 분석",
         ],
         "caption": "사출성형 공정 데이터를 분석하는 AI 어시스턴트입니다. 현장에서 쓰는 말 그대로 물어보면, 실제 생산 데이터를 근거로 답변과 그래프를 함께 보여드려요. AI가 생성한 답변은 부정확할 수 있으니 중요한 내용은 다시 확인해 주세요.",
         "ref_date": "데이터 기준일: {d} · 총 {n:,}건",
@@ -110,6 +126,19 @@ LANG = {
         "upload": "공정 데이터 업로드 (CSV)",
         "upload_ok": "업로드한 데이터로 분석합니다 ({n:,}행)",
         "missing": "필요한 컬럼이 없습니다: {cols}",
+        # [업로드 안내] 업로드 형식 안내 문구
+        "upload_help": "KAMP 사출성형 데이터와 같은 형식(45개 컬럼, UTF-8)의 CSV를 올려주세요. 아래 샘플 파일로 먼저 해볼 수 있어요.",
+        "sample_dl": "샘플 CSV 받기 (합성 데이터)",
+        "sample_help": "업로드 기능을 시험해볼 수 있는 시연용 합성 데이터입니다. 실제 공장 데이터가 아닙니다.",
+        "fmt_title": "이 파일은 아직 분석할 수 없어서, 기본 KAMP 데이터로 보여드리고 있어요.",
+        "fmt_scope": "지금은 KAMP 사출성형 데이터 형식만 지원합니다. 다른 형식의 컬럼을 자동으로 연결하는 기능은 다음 단계로 준비 중이에요.",
+        "fmt_unreadable": "CSV 파일로 읽을 수 없어요. 엑셀에서 'CSV UTF-8' 형식으로 다시 저장해 주세요.",
+        "fmt_missing_columns": "없는 컬럼 {n}개: {vals}",
+        "fmt_bad_pass_fail": "PassOrFail 값은 Y 또는 N이어야 해요. 파일에 있는 값: {vals}",
+        "fmt_bad_timestamp": "TimeStamp를 날짜·시각으로 읽을 수 없어요. 예: {vals}",
+        "fmt_unknown_parts": "PART_NAME이 알려진 품번({parts})으로 시작해야 해요. 파일에 있는 값: {vals}",
+        "fmt_unknown_reasons": "처음 보는 불량 사유가 있어요: {vals}. 분석은 되지만 검증된 조치안은 없어요.",
+        "fmt_required": "필요한 컬럼 목록",
         "reset": "대화 초기화",
         "drop": "\U0001F4C2 여기에 CSV 파일을 놓으세요",
         "drop_alert": "CSV 파일만 업로드할 수 있습니다.",
@@ -221,6 +250,19 @@ def axis_style(**overrides):
 # 언어 토글(과 질문을 새로 보낼 수 있는 다른 버튼들)을 비활성화해 누르지 못하게 막습니다.
 is_generating = st.session_state.get("is_generating", False)
 
+# [업로드 안내] 샘플 파일은 한 번만 읽어서 캐싱합니다. (4.7MB라 매번 읽으면 느려집니다)
+SAMPLE_PATH = "synthetic_shift_demo.csv"
+
+
+@st.cache_data
+def load_sample_bytes():
+    try:
+        with open(SAMPLE_PATH, "rb") as fp:
+            return fp.read()
+    except OSError:
+        return None   # 샘플 파일이 없으면 버튼만 숨깁니다
+
+
 with st.sidebar:
     st.markdown("### Language / 언어")
     # 심사위원이 처음 열었을 때 영어가 보이도록 영어를 기본값으로 둡니다.
@@ -232,7 +274,12 @@ with st.sidebar:
 
     st.markdown("### " + T["settings"])
     uploaded_file = st.file_uploader(T["upload"], type="csv", key="csv_uploader",
-                                      disabled=is_generating)
+                                      help=T["upload_help"], disabled=is_generating)
+    # [업로드 안내] 올릴 파일이 없는 사람도 바로 시험해볼 수 있게 샘플 파일을 내려받게 합니다.
+    _sample = load_sample_bytes()
+    if _sample:
+        st.download_button(T["sample_dl"], data=_sample, file_name=SAMPLE_PATH,
+                           mime="text/csv", help=T["sample_help"], disabled=is_generating)
     if st.button(T["reset"], disabled=is_generating):
         st.session_state.messages = []
         st.rerun()
@@ -339,15 +386,38 @@ components.html(
 )
 # ▲ 화면 전체 드래그 앤 드롭 업로드 기능 끝 ▲
 
+# [업로드 안내] 형식이 맞지 않는 파일을 올려도 앱이 멈추지 않게 합니다.
+# 예전에는 st.stop()으로 화면 전체가 멈춰서 채팅도 못 했습니다. 이제는 무엇이 문제인지
+# 목록으로 보여주고, 기본 KAMP 데이터로 계속 쓸 수 있게 돌아갑니다.
+def _problem_text(p, T):
+    shown = p.get("values", [])[:8]   # 너무 길면 8개까지만 (전체 목록은 아래 펼치기에서)
+    vals = ", ".join(str(v) for v in shown) + (" …" if len(p.get("values", [])) > 8 else "")
+    if p["code"] == "missing_columns":
+        return T["fmt_missing_columns"].format(n=len(p["values"]), vals=vals)
+    if p["code"] == "unknown_parts":
+        return T["fmt_unknown_parts"].format(parts=", ".join(f.KNOWN_PART_CODES), vals=vals)
+    return T.get(f"fmt_{p['code']}", p["code"]).format(vals=vals)
+
+
+df = None
 if uploaded_file is not None:
-    df_up = pd.read_csv(uploaded_file)
-    missing = f.validate_columns(df_up)
-    if missing:
-        st.error(T["missing"].format(cols=", ".join(missing[:5])))
-        st.stop()
-    df = get_data(uploaded_file)
-    st.sidebar.success(T["upload_ok"].format(n=len(df)))
-else:
+    try:
+        df_up = pd.read_csv(uploaded_file)
+        problems = f.check_upload_format(df_up)
+    except Exception:
+        problems = [{"code": "unreadable", "blocking": True, "values": []}]
+    blocking = [p for p in problems if p["blocking"]]
+    if blocking:
+        st.error(T["fmt_title"] + "\n\n" + "\n".join(f"- {_problem_text(p, T)}" for p in blocking)
+                 + "\n\n" + T["fmt_scope"])
+        with st.expander(T["fmt_required"]):
+            st.code(", ".join(f.REQUIRED_COLUMNS), language=None)
+    else:
+        df = get_data(uploaded_file)
+        st.sidebar.success(T["upload_ok"].format(n=len(df)))
+        for p in problems:
+            st.sidebar.info(_problem_text(p, T))
+if df is None:
     df = get_data()
 
 # 소개문구 + 기준일을 한 캡션 안에 묶어서 보여줍니다. 예전에는 둘을 따로 된 캡션으로
