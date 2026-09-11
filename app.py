@@ -31,7 +31,7 @@ st.set_page_config(page_title="ShopFloor Copilot", page_icon="🏭", layout="wid
 # ---------------------------------------------------------------------
 LANG = {
     "en": {
-        "caption": "Ask in plain language. Answers are backed by process data.",
+        "caption": "An AI assistant for your injection-molding process data. Ask in plain language and get answers backed by real production data, along with charts. AI can make mistakes — please double-check important information.",
         "ref_date": "Data as of {d} · {n:,} records",
         "settings": "Settings",
         "upload": "Upload process data (CSV)",
@@ -79,7 +79,7 @@ LANG = {
         "q6": "How does the process look right now?",
     },
     "ko": {
-        "caption": "현장에서 쓰는 말로 물어보세요. 공정 데이터를 근거로 답합니다.",
+        "caption": "사출성형 공정 데이터를 분석하는 AI 어시스턴트입니다. 현장에서 쓰는 말 그대로 물어보면, 실제 생산 데이터를 근거로 답변과 그래프를 함께 보여드려요. AI가 생성한 답변은 부정확할 수 있으니 중요한 내용은 다시 확인해 주세요.",
         "ref_date": "데이터 기준일: {d} · 총 {n:,}건",
         "settings": "설정",
         "upload": "공정 데이터 업로드 (CSV)",
