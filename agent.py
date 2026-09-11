@@ -37,7 +37,8 @@ TOOLS = [
             "날짜별 불량률을 계산해 불량이 가장 많았던 날을 찾는다. "
             "'이번 주에 불량 많았던 날 있었어?', '요즘 불량률 어때?', "
             "'최근에 불량이 늘어나는 추세야?' 같은 질문에 사용. "
-            "데이터의 마지막 생산일을 '오늘'로 보고 계산한다."
+            "데이터의 마지막 생산일을 '오늘'로 보고 계산한다. "
+            "추세 질문에는 결과의 daily_in_date_order(날짜순 표)로 답한다."
         ),
         "input_schema": {
             "type": "object",
@@ -56,14 +57,17 @@ TOOLS = [
             "특정 불량 원인(가스/미성형/초기허용불량) 그룹과 정상 제품의 센서값을 "
             "같은 품번 안에서 비교해, 차이가 큰 변수 순으로 보여준다. "
             "'가스 불량 났을 때 정상이랑 뭐가 달랐어?' 같은 원인 추적 질문에 사용. "
-            "part_code를 지정하지 않으면 품번별 결과를 모두 돌려준다."
+            "part_code를 지정하지 않으면 품번별 결과를 모두 돌려준다. "
+            "reason을 생략하면 원인별로 나눠 모두 비교한다. "
+            "결과의 defect_timing과 same_day_check를 반드시 확인한다."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": "불량 원인. '가스', '미성형', '초기허용불량' 중 하나.",
+                    "description": ("불량 원인. '가스', '미성형', '초기허용불량' 중 하나. "
+                                    "영어 질문이어도 이 한국어 값으로 넘긴다. 생략하면 원인별 전체."),
                 },
                 "part_code": {
                     "type": "string",
@@ -77,7 +81,6 @@ TOOLS = [
                     ),
                 },
             },
-            "required": ["reason"],
         },
     },
     {
@@ -105,13 +108,16 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "reason": {"type": "string"},
+                "reason": {
+                    "type": "string",
+                    "description": ("불량 원인. '가스', '미성형', '초기허용불량' 중 하나. "
+                                    "영어 질문이어도 이 한국어 값으로 넘긴다."),
+                },
                 "part_code": {
                     "type": "string",
                     "description": "품번 코드. 'CN7' 또는 'RG3'.",
                 },
             },
-            "required": ["reason"],
         },
     },
     {
@@ -122,8 +128,9 @@ TOOLS = [
             "결과는 defect_rate_pct(불량률) 기준으로 정렬되어 있다. "
             "n_defect(건수)만 보고 우선순위를 말하지 마라 — 생산량이 많은 품번은 "
             "불량률이 낮아도 건수만 많아 보일 수 있다. 반드시 defect_rate_pct 기준으로 답하라. "
-            "결과의 by_side에는 좌우(LH/RH)별 불량률이 들어 있어, "
-            "'LH랑 RH 중 어디가 불량이 많아?' 질문에도 이 도구로 답할 수 있다."
+            "결과의 by_side(전체 합산)와 by_part_side(품번·조건별)에 좌우(LH/RH) 불량률이 들어 있어, "
+            "'LH랑 RH 중 어디가 불량이 많아?' 질문에도 이 도구로 답할 수 있다. "
+            "좌우를 말할 때는 반드시 by_part_side로 품번·조건별 방향을 확인한다."
         ),
         "input_schema": {
             "type": "object",
@@ -151,7 +158,9 @@ TOOLS = [
         "description": (
             "가장 최근에 발생한 불량을 한 건씩 조회한다. 각 건마다 같은 품번·같은 운전 조건의 "
             "정상 제품과 비교해 크게 벗어난 값을 함께 돌려준다. "
-            "'최근 불량 5건 원인 알려줘', '방금 난 불량 왜 그래?' 같은 질문에 사용."
+            "'최근 불량 5건 원인 알려줘', '방금 난 불량 왜 그래?', "
+            "'교대 인수인계용으로 오늘 특이사항 요약해줘' 같은 질문에 사용. "
+            "결과의 reference_date와 time_hint로 '오늘'이 언제인지 확인한다."
         ),
         "input_schema": {
             "type": "object",
@@ -181,10 +190,14 @@ TOOLS = [
                 "variable": {
                     "type": "string",
                     "description": ("확인할 값의 현장 용어. 사출속도, 사출시간, 충전시간, 사출압력, "
-                                    "보압, 배압, 금형온도, 배럴온도, 호퍼온도, 스크류회전수, "
-                                    "사이클타임, 가소화시간, 쿠션위치, 형체시간 중 하나."),
+                                    "전환압력, 배압, 금형온도, 배럴온도, 호퍼온도, 스크류회전수, "
+                                    "사이클타임, 가소화시간, 쿠션위치, 형체시간 중 하나. "
+                                    "'압력이랑 온도 중 뭐가 문제야?'처럼 묶어서 물으면 '압력', '온도'로 "
+                                    "각각 호출한다. 영어 이름(injection pressure 등)도 된다."),
                 },
-                "reason": {"type": "string", "description": "불량 원인(선택). 생략하면 전체 불량 대상."},
+                "reason": {"type": "string",
+                           "description": ("불량 원인(선택). '가스', '미성형', '초기허용불량' 중 하나. "
+                                           "생략하면 원인별로 나눠 계산한다(섞지 않음).")},
                 "part_code": {
                     "type": "string",
                     "description": ("품번 코드. 'CN7' 또는 'RG3'. 생략하면 불량이 있는 "
@@ -264,8 +277,49 @@ SYSTEM_PROMPT = """\
   하지만 답을 주기 전에 정보를 요구하는 것은 안 됩니다.
 
 [LH/RH 질문]
-- list_part_codes 결과의 by_side에 좌우별 불량률이 들어 있습니다.
-  "LH랑 RH 중 어디가 불량이 많아?"는 이 값으로 답하세요.
+- list_part_codes 결과의 by_side(전체 합산)와 by_part_side(품번·조건별)에 좌우별 불량률이 들어 있습니다.
+- 합산만 보고 "모든 품번에서 RH가 높다"고 일반화하지 마세요. 품번·조건별로 방향이 뒤집힙니다.
+  (예: RG3 고속은 RH만 불량, RG3 저속은 LH가 더 높음)
+- paired_shots=true이면 LH·RH는 같은 샷에서 나와 센서값이 같습니다. 그 좌우 차이는 설비 설정값으로
+  설명할 수 없고 금형의 좌우 캐비티 쪽이 확인 대상이라고 말하세요. 이젝터 핀 같은 구체적 원인은 추측하지 마세요.
+
+[도구 인자 — 영어 질문에도 똑같이]
+- 도구에 넘기는 값은 항상 데이터에 적힌 한국어 값입니다.
+  reason='가스'/'미성형'/'초기허용불량', mode='저속'/'고속', part_code='CN7'/'RG3'.
+- 번역은 최종 답변을 쓸 때만 합니다.
+
+[도구가 error를 돌려줄 때 — 매우 중요]
+- error는 "호출 방법이 틀렸다"는 뜻이지, 데이터에 문제가 있다는 증거가 아닙니다.
+- valid_reasons나 available 목록을 보고 올바른 값으로 다시 호출하세요.
+- "데이터가 연결되어 있지 않다", "로깅에 문제가 있다", "측정하지 않는다" 같은 이유를 지어내지 마세요.
+- 다시 호출해도 안 되면 "이 질문은 지금 도구로 확인하지 못했습니다"라고만 말하세요.
+
+[측정되어 있는 값]
+- 사출압력, 전환압력(V/P 전환 시점 압력), 배압, 금형온도 3·4번, 배럴온도 1~6번, 호퍼온도,
+  사출속도, 사출·충전·가소화·사이클 시간, 스크류 회전수, 쿠션위치는 데이터에 있습니다.
+- "측정하지 않는 값"이라고 말하기 전에 반드시 check_variable을 호출해서 확인하세요.
+- 보압(holding pressure)을 직접 잰 값은 없습니다. 전환압력을 보압이라고 부르지 마세요.
+
+[숫자는 도구 결과 그대로]
+- 평균·범위·건수는 도구 결과에 있는 숫자를 그대로 옮기세요. 새로 만들거나 어림하지 마세요.
+- 도구 결과에 없는 숫자는 쓰지 마세요.
+
+[근거 없는 원인 추천 금지]
+- 도구 결과에서 차이가 확인되지 않은 변수를 "더 관련 있다", "대신 이걸 보라"고 추천하지 마세요.
+- 점검 항목을 제안할 때는 도구 결과에 나온 변수만 쓰세요.
+
+[원인을 섞지 않기]
+- check_variable을 reason 없이 부르면 원인별로 나뉘어 옵니다. findings에 하나라도 있으면
+  "관계없다"고 단정하지 말고, 어느 원인·품번·조건에서 차이가 있었는지 밝히세요.
+
+[시간 쏠림 — 세 번째 착시]
+- defect_timing.concentrated=true이면 "불량 N건이 모두 O월 O일 O분 사이에 몰려 있었다"고 먼저 밝히세요.
+- same_day_check.survives_same_day=false인 값은 '원인'이라고 말하지 마세요.
+  "불량이 난 날은 정상 제품도 같은 값이었으므로, 그날의 상태일 뿐 원인으로 확인되지 않았다"고 말하세요.
+
+[오늘·지금]
+- '오늘', '지금'은 데이터의 기준일(reference_date) 기준입니다. 실제 오늘 날짜가 아닙니다.
+- 최근 불량 시각을 '지금', '지난 1시간'으로 표현하지 말고 기준일로부터 며칠 전인지 밝히세요.
 
 [값을 지정한 질문]
 - "금형온도가 관계있어?"처럼 특정 값을 지목한 질문에는 반드시 check_variable을 쓰세요.
@@ -295,12 +349,33 @@ LANG_RULE = {
     "en": (
         "\n\n[Language]\n"
         "Answer in English. All rules above still apply.\n"
-        "Use these field terms: mold temperature, barrel temperature, hopper temperature,\n"
-        "injection speed, injection time, filling time, plasticizing time,\n"
-        "screw RPM, back pressure, holding pressure, cycle time, cushion position.\n"
-        "Keep defect reason names as: gas, short shot (미성형), initial tolerance defect (초기허용불량).\n"
-        "Part codes (CN7, RG3) and operating modes stay as they are, but translate\n"
-        "'저속' as 'low-speed' and '고속' as 'high-speed'."
+        "\n"
+        "[Tool arguments]\n"
+        "Always pass the Korean data values to tools, even when the question is in English:\n"
+        "reason = '가스' (gas) / '미성형' (short shot) / '초기허용불량' (startup scrap),\n"
+        "mode = '저속' (low-speed) / '고속' (high-speed). Translate only in the final answer.\n"
+        "\n"
+        "[Do not ask back]\n"
+        "Never ask the user which part, parameter, defect type or operating mode to check.\n"
+        "Call the tools for all of them and give the result. Do not write 'Would you like me to...?',\n"
+        "'Which part should I analyze first?' or 'Should I check...?'. After a complete answer,\n"
+        "one short line such as 'You can also ask about ...' is fine.\n"
+        "\n"
+        "[Measured values]\n"
+        "Measured: injection pressure, switch-over pressure, back pressure, mold temperature (zones 3-4),\n"
+        "barrel temperature (zones 1-6), hopper temperature, injection speed, injection time, filling time,\n"
+        "plasticizing time, cycle time, screw RPM, cushion position.\n"
+        "Holding pressure is NOT measured directly; do not call switch-over pressure 'holding pressure'.\n"
+        "Back pressure and holding pressure are different things.\n"
+        "Before saying any value is not measured, call check_variable.\n"
+        "\n"
+        "[Tool errors]\n"
+        "A tool error means the call was wrong, not that the data is broken. Retry with valid values.\n"
+        "Never invent explanations such as 'the data is not linked' or 'a logging problem'.\n"
+        "\n"
+        "[Wording]\n"
+        "Part codes (CN7, RG3) stay as they are. Say 'startup scrap' for 초기허용불량.\n"
+        "Copy every number exactly from the tool results."
     ),
 }
 
@@ -308,13 +383,14 @@ LANG_RULE = {
 FUNCTION_MAP = {
     "get_worst_day": lambda df, **kw: f.get_worst_day(df, days=kw.get("days")),
     "compare_normal_vs_defect": lambda df, **kw: f.compare_normal_vs_defect(
-        df, kw["reason"], part_code=kw.get("part_code"), mode=kw.get("mode")),
-    "get_operating_modes": lambda df, **kw: f.detect_operating_modes(df, kw["part_code"]),
+        df, kw.get("reason"), part_code=kw.get("part_code"), mode=kw.get("mode")),
+    "get_operating_modes": lambda df, **kw: f.detect_operating_modes(
+        df, f._normalize_part(kw.get("part_code"))),
     "suggest_action": lambda df, **kw: f.suggest_action(
-        df, kw["reason"], part_code=kw.get("part_code")),
+        df, kw.get("reason"), part_code=kw.get("part_code")),
     "list_part_codes": lambda df, **kw: f.list_part_codes(df, kw.get("reason")),
     "count_defects_by_reason": lambda df, **kw: f.count_defects_by_reason(
-        df, part_code=kw.get("part_code")),
+        df, part_code=f._normalize_part(kw.get("part_code"))),
     "get_recent_defects": lambda df, **kw: f.get_recent_defects(df, n=kw.get("n", 5)),
     "check_variable": lambda df, **kw: f.check_variable(
         df, kw["variable"], reason=kw.get("reason"),
@@ -323,13 +399,17 @@ FUNCTION_MAP = {
 }
 
 
-def ask(question: str, df, history=None, lang: str = "ko", tools_used=None) -> str:
+def ask(question: str, df, history=None, lang: str = "ko", tools_used=None,
+        tool_log=None) -> str:
     """사용자 질문 하나를 받아 최종 답변 문자열을 반환합니다.
 
     lang       : 'ko' 또는 'en'. 답변 언어를 정합니다.
     tools_used : 리스트를 넘기면, 이번 답변에서 실제로 호출된 도구 이름이 담깁니다.
                  app.py가 "어떤 그래프를 그릴지" 판단할 때 씁니다.
                  (질문 문자열을 비교하는 방식은 사용자가 직접 타이핑하면 빗나갑니다.)
+    tool_log   : [수정 A5] 리스트를 넘기면 {"name", "input", "error"}가 담깁니다.
+                 app.py가 AI가 '실제로 무엇을 분석했는지' 보고 같은 조건의 차트를 그리고,
+                 에러가 난 호출에는 차트를 붙이지 않게 하려고 씁니다.
     """
     system = SYSTEM_PROMPT + LANG_RULE.get(lang, "")
 
@@ -366,7 +446,19 @@ def ask(question: str, df, history=None, lang: str = "ko", tools_used=None) -> s
             if func is None:
                 result = {"error": f"알 수 없는 도구: {block.name}"}
             else:
-                result = func(df, **block.input)
+                try:
+                    result = func(df, **block.input)
+                except Exception as e:
+                    # 함수 안에서 예외가 나도 앱이 죽지 않고, AI가 다시 호출할 수 있게 합니다.
+                    result = {"error": f"{type(e).__name__}: {e}",
+                              "hint": "호출 값이 잘못되었을 수 있습니다. 설명을 보고 다시 호출하세요."}
+
+            if tool_log is not None:
+                tool_log.append({
+                    "name": block.name,
+                    "input": dict(block.input),
+                    "error": isinstance(result, dict) and "error" in result,
+                })
 
             tool_results.append({
                 "type": "tool_result",
