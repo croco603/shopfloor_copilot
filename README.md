@@ -25,7 +25,17 @@ Usage: Modification permitted
 
 - 7,996 rows x 45 columns
 - 71 defective cases (0.89%)
-- Defect reasons: Gas (35) / Initial tolerance defect (20) / Short shot (16)
+- Defect reasons: Gas (35) / Startup scrap, labeled "initial tolerance defect" (20) / Short shot (16)
+
+## How It Avoids Misleading Answers
+
+Averages over the whole dataset pointed to the wrong causes three times. The app now narrows every comparison step by step:
+
+1. **Same part** — CN7 and RG3 run with different molds and settings.
+2. **Same operating mode** — CN7 screw RPM is either ~29 or ~292; the average (124.7) never actually occurs.
+3. **Same day** — all 13 CN7 gas defects happened within 36 minutes on 2020-10-16, and normal parts from that day had the same mold temperature. A difference that disappears against same-day normal parts is not reported as a cause.
+
+When nothing survives these checks, the app says so instead of inventing a cause.
 
 ## Tech Stack
 
@@ -55,7 +65,7 @@ Create a `.env` file in the project root:
 ANTHROPIC_API_KEY=your_key_here
 ```
 
-4. Download the dataset from KAMP (kamp-ai.kr) and place `labeled_data.csv` in the project root.
+4. The dataset (`labeled_data.csv`) is already included in this repository.
 
 ## Run
 
@@ -67,3 +77,12 @@ streamlit run app.py
 
 Kim Segwan, Minho, Jiwon — Mirae Future Tech School
 Built for AI Builders Hackathon 2026
+
+## Known Limitations
+
+- The app may take 30–60 seconds to wake up if it has not been used for a few days (Streamlit Cloud).
+- Action rules and field terms are specific to injection molding.
+- 2,764 rows in the dataset appear to be duplicate records (same timestamp, part and sensor values).
+  Daily defect rates are unaffected, but raw counts include them.
+- LH and RH parts come from the same shot and share identical sensor values, so the data cannot explain
+  why one side has more defects; the mold cavity itself has to be inspected.

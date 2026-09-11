@@ -78,10 +78,40 @@ def load_data(source=None) -> pd.DataFrame:
     return df
 
 
+# 불량 사유의 영어·다른 표기 -> 데이터에 실제로 들어있는 한국어 값
+# (영어 모드에서 AI가 'gas', 'short shot'으로 부르면 데이터와 매칭되지 않아
+#  "해당 불량이 없다"는 잘못된 답이 나옵니다. 여기서 흡수합니다.)
+REASON_ALIASES = {
+    "가스": "가스",
+    "gas": "가스",
+    "gasdefect": "가스",
+    "gasdefects": "가스",
+    "미성형": "미성형",
+    "shortshot": "미성형",
+    "shortshots": "미성형",
+    "shortshotdefect": "미성형",
+    "incompletemolding": "미성형",
+    "초기허용불량": "초기허용불량",
+    "initialtolerancedefect": "초기허용불량",
+    "initialtolerancedefects": "초기허용불량",
+    "initialallowabledefect": "초기허용불량",
+    "initialdefect": "초기허용불량",
+}
+
+
+def _normalize_reason(reason):
+    """'gas', 'Short Shot', '미성형' 등을 데이터의 실제 값으로 맞춥니다."""
+    if not reason:
+        return reason
+    key = str(reason).lower().replace(" ", "").replace("_", "").replace("-", "")
+    return REASON_ALIASES.get(key, reason)
+
+
 def list_part_codes(df: pd.DataFrame, reason: str = None) -> dict:
     """분석에 쓸 수 있는 품번 목록과 각 품번의 불량 건수·불량률을 알려줍니다.
     agent가 '어떤 품번으로 비교할지' 정할 때 참고합니다.
     """
+    reason = _normalize_reason(reason)
     rows = []
     for code, g in df.groupby("part_code"):
         n_defect = (g["Reason"] == reason).sum() if reason else (g["PassOrFail"] == "N").sum()
@@ -390,8 +420,11 @@ def compare_normal_vs_defect(df: pd.DataFrame, reason: str, part_code: str = Non
 
     인자를 생략하면 그 단계를 나누어 전부 돌려줍니다.
     """
+    reason = _normalize_reason(reason)
     if reason not in df["Reason"].dropna().unique():
-        return {"error": f"'{reason}' 원인에 해당하는 데이터가 없습니다.", "n_defect": 0}
+        return {"error": f"'{reason}' 원인에 해당하는 데이터가 없습니다.",
+                "available_reasons": sorted(df["Reason"].dropna().unique().tolist()),
+                "n_defect": 0}
 
     # 품번 지정이 없으면 품번별로 나눠서 전부 비교
     # (각 품번 안에 운전 조건이 갈리면 그것까지 나눕니다)
@@ -651,6 +684,7 @@ def check_variable(df: pd.DataFrame, variable: str, reason: str = None,
     주의: 운전 조건이 있는 품번에서 mode를 지정하지 않으면 두 조건이 섞여
     결론이 왜곡될 수 있습니다. 그래서 조건이 있으면 자동으로 나누어 계산합니다.
     """
+    reason = _normalize_reason(reason)
     cols = _ALIAS_LOOKUP.get(_normalize_variable(variable))
     if not cols:
         cols = [c for c in SENSOR_COLS
@@ -734,6 +768,7 @@ def suggest_action(df: pd.DataFrame, reason: str, part_code: str = None) -> dict
     품번마다 원인이 다르기 때문에, 한 품번에서 얻은 조치를
     다른 품번에 그대로 적용하면 위험합니다.
     """
+    reason = _normalize_reason(reason)
     part_rate = df.groupby("part_code").apply(
         lambda g: round((g["PassOrFail"] == "N").mean() * 100, 2)
     ).sort_values(ascending=False)
