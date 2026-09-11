@@ -336,11 +336,15 @@ def render_kpi_row(data, T, key_prefix="kpi"):
          f"{top_part['defect_rate_pct']}%" if top_part else None),
     ]
     # 카드마다 테두리를 둘러서 배경 위에 붕 떠 보이지 않고 하나의 패널처럼 보이게 합니다.
-    # key에 key_prefix + 인덱스를 넣어서, 같은 값의 KPI가 여러 메시지에 걸쳐
-    # 반복돼도 StreamlitDuplicateElementId 에러가 나지 않게 합니다.
+    # [버그 수정] st.metric()은 key 인자를 받지 않습니다(공식 문서 기준 미지원 파라미터라
+    # TypeError가 남). 실제 배포 사이트에서 "현재 상황 요약" 질문에 이 대시보드가
+    # 처음 정상적으로 그려지자마자 이 에러로 죽는 게 확인됐습니다. 같은 KPI가
+    # 여러 메시지에 걸쳐 반복돼도 구분되게 하려던 목적은 st.metric 대신 그걸
+    # 감싸는 st.container 쪽에 key를 줘서 그대로 달성합니다(container는 key를
+    # 지원합니다).
     for i, (col, (label, value, delta)) in enumerate(zip(st.columns(4, gap="medium"), kpis)):
-        with col, st.container(border=True):
-            st.metric(label, value, delta, delta_color="off", key=f"{key_prefix}_{i}")
+        with col, st.container(border=True, key=f"{key_prefix}_{i}"):
+            st.metric(label, value, delta, delta_color="off")
 
 
 def render_chart_card(fig, key=None):
