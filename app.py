@@ -175,12 +175,18 @@ with st.sidebar:
 st.title("🏭 ShopFloor Copilot")
 
 # 처음 보는 사람도 "이게 뭐하는 앱인지, 뭐가 좋은지"를 3초 안에 알 수 있게
-# 헤드라인 한 줄 + 핵심 장점 3가지를 배지 카드로 보여줍니다.
+# 헤드라인 한 줄 + 핵심 장점 3가지를 보여줍니다.
+# (테두리 박스로 감싸면 아래 예시 질문 버튼이랑 비슷해 보여서 "이것도 눌러야
+#  하나?" 하는 착각을 줄 수 있습니다. 그래서 버튼처럼 안 보이게, 배경이 옅은
+#  알약 모양 태그로 한 줄에 나란히 붙여서 보여줍니다.)
 st.markdown(f"#### {T['headline']}")
-_badge_cols = st.columns(3, gap="medium")
-for _col, _badge in zip(_badge_cols, T["badges"]):
-    with _col, st.container(border=True):
-        st.markdown(_badge)
+_badge_html = "".join(
+    f'<span style="display:inline-block;background:rgba(57,135,229,0.12);'
+    f'color:#3987e5;border-radius:999px;padding:5px 14px;margin:2px 8px 8px 0;'
+    f'font-size:0.85rem;font-weight:500;white-space:nowrap;">{_badge}</span>'
+    for _badge in T["badges"]
+)
+st.markdown(_badge_html, unsafe_allow_html=True)
 
 st.caption(T["caption"])
 
