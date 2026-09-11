@@ -154,12 +154,47 @@ COLOR_BLUE = "#3987e5"
 COLOR_RED = "#e66767"
 COLOR_MUTED = "#898781"
 COLOR_GRID = "#2c2c2a"
+COLOR_AXIS = "#383835"    # 축선/기준선 (팔레트의 baseline/axis 톤)
+COLOR_TEXT = "#c3c2b7"    # 라벨/눈금 글자 (막대 색을 그대로 쓰지 않고 별도 텍스트 톤 사용)
+COLOR_SURFACE = "#0e1117"  # Streamlit 다크 테마 배경. 마커 테두리/툴팁 배경에 맞춰 씁니다.
+CHART_FONT = "'Source Sans Pro', -apple-system, 'Segoe UI', sans-serif"
 
+# [디자인 수정] 기본 plotly 차트가 "파워포인트 기본 차트 같다"는 피드백을 받아서,
+# 폰트/축선/툴팁/막대 모서리 등 세부 마감을 다시 잡았습니다. 굵은 색은 데이터에만
+# 쓰고, 축/그리드/라벨은 절제된 톤으로 - 라는 원칙으로 아래 공통 스타일을 정의합니다.
 CHART_BASE_LAYOUT = dict(
     plot_bgcolor="rgba(0,0,0,0)",
     paper_bgcolor="rgba(0,0,0,0)",
-    margin=dict(l=10, r=10, t=40, b=10),
+    margin=dict(l=10, r=10, t=48, b=10),
+    font=dict(family=CHART_FONT, color=COLOR_TEXT, size=12),
+    hoverlabel=dict(bgcolor=COLOR_SURFACE, bordercolor=COLOR_GRID,
+                     font=dict(family=CHART_FONT, color="#ffffff", size=12)),
+    bargap=0.45,
 )
+
+# 막대/선/마커에 공통으로 쓰는 마감 스펙 (둥근 막대 끝, 굵기 있는 마커+테두리).
+BAR_MARKER_STYLE = dict(cornerradius=4, line=dict(width=0))
+LABEL_FONT = dict(family=CHART_FONT, color=COLOR_TEXT, size=12)
+
+
+def chart_title(text):
+    """모든 차트 제목을 같은 폰트/크기/왼쪽 정렬로 통일합니다.
+
+    fig.update_layout(title=..., **CHART_BASE_LAYOUT)처럼 title을 매번
+    별도 인자로 넘기기 때문에, title 스타일은 CHART_BASE_LAYOUT 안에 두지
+    않고 이 헬퍼로 각 호출부에서 직접 만듭니다 (안 그러면 title 키가
+    두 번 넘어가서 "multiple values for keyword argument" 에러가 납니다).
+    """
+    return dict(text=text, font=dict(family=CHART_FONT, color="#ffffff", size=15),
+                x=0.02, xanchor="left")
+
+
+def axis_style(**overrides):
+    """축선을 팔레트의 절제된 톤으로 통일합니다 (plotly 기본 회색 대신)."""
+    base = dict(showline=True, linecolor=COLOR_AXIS, ticks="outside",
+                tickcolor=COLOR_AXIS, tickfont=LABEL_FONT, zeroline=False)
+    base.update(overrides)
+    return base
 
 # ---------------------------------------------------------------------
 # 사이드바 — 언어 / 업로드 / 초기화
@@ -354,7 +389,10 @@ def render_chart_card(fig, key=None):
          요소로 인식하도록 하는 고유값입니다. (StreamlitDuplicateElementId 방지)
     """
     with st.container(border=True):
-        st.plotly_chart(fig, use_container_width=True, key=key)
+        # [디자인 수정] 기본 plotly 툴바(카메라/줌/팬 아이콘)가 계속 떠 있으면
+        # 완제품이 아니라 "그래프 그리는 도구" 느낌이 나서 꺼둡니다.
+        st.plotly_chart(fig, use_container_width=True, key=key,
+                        config={"displayModeBar": False})
 
 
 def render_chart_row(figs, key_prefix="row"):
@@ -375,19 +413,19 @@ def render_chart_row(figs, key_prefix="row"):
 def make_production_fig(daily, T):
     fig = go.Figure(go.Bar(
         x=daily["date"], y=daily["생산"],
-        marker_color=COLOR_BLUE,
+        marker=dict(color=COLOR_BLUE, **BAR_MARKER_STYLE),
         hovertemplate="%{x|%m/%d}<br>%{y}<extra></extra>",
     ))
     fig.update_layout(
-        title=T["t_prod"],
+        title=chart_title(T["t_prod"]),
         height=340,
         # [버그 수정] 날짜 범위가 좁을 때(예: 최근 7일) plotly가 자동으로 하루보다
         # 촘촘한 간격(예: 12시간)으로 눈금을 잡아서, tickformat="%m/%d"에는 시간이
         # 안 보이니까 같은 날짜가 두 번씩 찍혀 보이는 문제가 있었습니다.
         # dtick을 하루(밀리초 단위 86400000)로 고정해서 항상 하루에 눈금 하나만
         # 찍히게 합니다.
-        xaxis=dict(showgrid=False, tickformat="%m/%d", dtick=86400000),
-        yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
+        xaxis=axis_style(showgrid=False, tickformat="%m/%d", dtick=86400000),
+        yaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False),
         **CHART_BASE_LAYOUT,
     )
     return fig
@@ -410,28 +448,32 @@ def make_defect_rate_fig(daily, T, days=None):
     fig.add_trace(go.Scatter(
         x=daily["date"], y=daily["불량률(%)"],
         mode="lines+markers",
-        line=dict(color=COLOR_BLUE, width=2),
-        marker=dict(size=6),
+        line=dict(color=COLOR_BLUE, width=2, shape="spline", smoothing=0.3),
+        # [디자인 수정] 마커를 8px 이상으로 키우고, 배경색으로 얇은 테두리(ring)를
+        # 둘러서 선 위에 놓여도 뭉개지지 않고 또렷하게 보이게 합니다.
+        marker=dict(size=8, color=COLOR_BLUE, line=dict(width=2, color=COLOR_SURFACE)),
         name=T["l_rate"],
         hovertemplate="%{x|%m/%d}<br>%{y}%<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=[worst_row["date"]], y=[worst_row["불량률(%)"]],
         mode="markers+text",
-        marker=dict(size=14, color=COLOR_RED, symbol="star"),
+        marker=dict(size=16, color=COLOR_RED, symbol="star",
+                    line=dict(width=2, color=COLOR_SURFACE)),
         text=[T["l_worst"].format(v=worst_row["불량률(%)"])],
         textposition="top center",
+        textfont=LABEL_FONT,
         name=T["l_worst_name"],
         hovertemplate="%{x|%m/%d}<br>%{y}%<extra></extra>",
     ))
     fig.update_layout(
-        title=title,
+        title=chart_title(title),
         height=340,
         showlegend=False,
         # [버그 수정] make_production_fig와 같은 이유로, 날짜 범위가 좁은
         # "최근 N일" 질문에서 같은 날짜가 두 번씩 찍히던 문제를 dtick 고정으로 막습니다.
-        xaxis=dict(showgrid=False, tickformat="%m/%d", dtick=86400000),
-        yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
+        xaxis=axis_style(showgrid=False, tickformat="%m/%d", dtick=86400000),
+        yaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
     )
     return fig
@@ -455,16 +497,17 @@ def make_reason_fig(data, T):
 
     fig = go.Figure(go.Bar(
         x=counts, y=reasons, orientation="h",
-        marker_color=colors,
+        marker=dict(color=colors, **BAR_MARKER_STYLE),
         text=[str(c) for c in counts],
         textposition="outside",
+        textfont=LABEL_FONT,
         hovertemplate="%{y}: %{x}<extra></extra>",
     ))
     fig.update_layout(
-        title=T["t_reason"],
+        title=chart_title(T["t_reason"]),
         height=340,
-        xaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
-        yaxis=dict(showgrid=False),
+        xaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False),
+        yaxis=axis_style(showgrid=False, linecolor=COLOR_GRID),
         **CHART_BASE_LAYOUT,
     )
     return fig
@@ -486,16 +529,17 @@ def make_part_fig(data, T):
 
     fig = go.Figure(go.Bar(
         x=parts, y=rates,
-        marker_color=colors,
+        marker=dict(color=colors, **BAR_MARKER_STYLE),
         text=[f"{r}%" for r in rates],
         textposition="outside",
+        textfont=LABEL_FONT,
         hovertemplate="%{x}: %{y}%<extra></extra>",
     ))
     fig.update_layout(
-        title=T["t_part"],
+        title=chart_title(T["t_part"]),
         height=340,
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
+        xaxis=axis_style(showgrid=False, linecolor=COLOR_GRID),
+        yaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
     )
     return fig
@@ -517,16 +561,17 @@ def make_side_fig(data, T):
 
     fig = go.Figure(go.Bar(
         x=sides, y=rates,
-        marker_color=colors,
+        marker=dict(color=colors, **BAR_MARKER_STYLE),
         text=[f"{r}%" for r in rates],
         textposition="outside",
+        textfont=LABEL_FONT,
         hovertemplate="%{x}: %{y}%<extra></extra>",
     ))
     fig.update_layout(
-        title=T["t_side"],
+        title=chart_title(T["t_side"]),
         height=340,
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
+        xaxis=axis_style(showgrid=False, linecolor=COLOR_GRID),
+        yaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
     )
     return fig
@@ -550,21 +595,22 @@ def make_variable_compare_fig(compare_result, T, top_n=4, context=""):
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=variables, y=normal_vals, name=T["l_normal"],
-        marker_color=COLOR_BLUE,
-        text=[str(v) for v in normal_vals], textposition="outside",
+        marker=dict(color=COLOR_BLUE, **BAR_MARKER_STYLE),
+        text=[str(v) for v in normal_vals], textposition="outside", textfont=LABEL_FONT,
         hovertemplate="%{x}: %{y}<extra></extra>",
     ))
     if any(v is not None for v in same_day_vals):
         fig.add_trace(go.Bar(
             x=variables, y=same_day_vals, name=T["l_same_day"],
-            marker_color=COLOR_MUTED,
+            marker=dict(color=COLOR_MUTED, **BAR_MARKER_STYLE),
             text=["" if v is None else str(v) for v in same_day_vals], textposition="outside",
+            textfont=LABEL_FONT,
             hovertemplate="%{x}: %{y}<extra></extra>",
         ))
     fig.add_trace(go.Bar(
         x=variables, y=defect_vals, name=T["l_defect"],
-        marker_color=COLOR_RED,
-        text=[str(v) for v in defect_vals], textposition="outside",
+        marker=dict(color=COLOR_RED, **BAR_MARKER_STYLE),
+        text=[str(v) for v in defect_vals], textposition="outside", textfont=LABEL_FONT,
         hovertemplate="%{x}: %{y}<extra></extra>",
     ))
     fig.update_layout(
@@ -572,13 +618,19 @@ def make_variable_compare_fig(compare_result, T, top_n=4, context=""):
         # 그 안에 밀어넣어서 글씨가 겹쳐 보였습니다. 여백을 넉넉히 키우고,
         # 범례는 그 넓어진 여백의 아래쪽(그래프 바로 위)에, 제목은 위쪽에
         # 오도록 확실히 떨어뜨립니다.
-        title=T["t_var"].format(ctx=context),
+        title=chart_title(T["t_var"].format(ctx=context)),
         barmode="group",
+        bargap=0.35,
+        bargroupgap=0.15,
         height=360,
         margin=dict(l=10, r=10, t=80, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
+        font=dict(family=CHART_FONT, color=COLOR_TEXT, size=12),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+                    font=LABEL_FONT, bgcolor="rgba(0,0,0,0)"),
+        hoverlabel=dict(bgcolor=COLOR_SURFACE, bordercolor=COLOR_GRID,
+                         font=dict(family=CHART_FONT, color="#ffffff", size=12)),
+        xaxis=axis_style(showgrid=False, linecolor=COLOR_GRID),
+        yaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
     )
@@ -605,17 +657,18 @@ def make_mode_compare_fig(mode_info, T):
 
     fig = go.Figure(go.Bar(
         x=names, y=rates,
-        marker_color=colors,
+        marker=dict(color=colors, **BAR_MARKER_STYLE),
         text=[f"{r}%" for r in rates],
         textposition="outside",
+        textfont=LABEL_FONT,
         hovertemplate="%{x}: %{y}%<extra></extra>",
     ))
     fig.update_layout(
         # [수정 P5] 어느 품번 차트인지 제목에 밝힙니다. (RG3 차트인데 품번이 안 보이던 문제)
-        title=T["t_mode"].format(p=mode_info.get("part_code", ""), v=split_var),
+        title=chart_title(T["t_mode"].format(p=mode_info.get("part_code", ""), v=split_var)),
         height=360,
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
+        xaxis=axis_style(showgrid=False, linecolor=COLOR_GRID),
+        yaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
     )
     return fig
@@ -786,7 +839,16 @@ if col6.button(T["b6"]):
 # ---------------------------------------------------------------------
 for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
-        st.write(msg["content"])
+        # [지원님 작업] 답변(assistant)은 질문 당시 한국어·영어 버전을 둘 다
+        # 저장해두고, 지금 켜진 언어 토글에 맞는 쪽을 골라서 보여줍니다. 이렇게
+        # 하면 언어 버튼을 눌렀을 때 과거 답변도 바로 그 언어로 바뀌어 보입니다.
+        # (구버전 세션에서 넘어온 메시지처럼 content_{lang}이 없을 때는
+        #  content로 대체합니다.)
+        if msg["role"] == "assistant":
+            display_text = msg.get(f"content_{lang}", msg["content"])
+        else:
+            display_text = msg["content"]
+        st.write(display_text)
         if msg["role"] == "assistant":
             # 메시지 인덱스를 key_prefix로 넘겨서, 같은 차트가 다른 메시지에서
             # 반복돼도 고유한 key를 갖게 합니다.
@@ -806,10 +868,25 @@ if user_input:
             answer = agent.ask(user_input, df, history=history,
                                lang=lang, tools_used=tools_used, tool_log=tool_log)
             charts = decide_charts(tool_log, df)
+
+            # [지원님 작업] 답변이 나오면, 반대 언어 버전도 바로 번역해서 같이
+            # 만들어둡니다. (전체 도구 호출을 다시 하는 게 아니라 완성된 답변
+            # 문장만 가볍게 번역하므로 API 호출이 1번 더 늘어나는 정도입니다.)
+            other_lang = "en" if lang == "ko" else "ko"
+            translated = agent.translate_text(answer, other_lang)
+            content_ko = answer if lang == "ko" else translated
+            content_en = translated if lang == "ko" else answer
         st.write(answer)
         # 이번 턴에 새로 나온 답변이므로, 아직 히스토리에 없는 고유한 key_prefix를 씁니다.
         render_answer_charts(charts, df, T, key_prefix="current")
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": answer, "charts": charts}
-    )
+    # content는 항상 한국어판을 기준으로 저장해서, 다음 질문의 history로 넘어갈 때도
+    # 시스템 프롬프트(한국어)와 일관된 맥락을 유지하게 합니다.
+    # content_ko / content_en은 화면 표시용으로, 언어 토글에 따라 골라서 보여줍니다.
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": content_ko,
+        "content_ko": content_ko,
+        "content_en": content_en,
+        "charts": charts,
+    })
