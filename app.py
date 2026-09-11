@@ -632,12 +632,22 @@ def decide_charts(tool_log, data):
 
     # 현황 요약 질문은 보통 여러 도구를 한꺼번에 부릅니다 -> 대시보드 전체를 보여줍니다.
     # [수정 P7] list_part_codes 하나에 품번·불량률·좌우 정보가 다 들어있어서,
-    # AI가 그 도구 하나만으로 "지금 상황이 어때요?" 같은 요약 질문에 답을 끝내는
-    # 경우가 있습니다. 그러면 이 조건(>=2)을 못 채워서 정작 "현재 상황 요약"
-    # 버튼을 눌러도 차트가 하나도 안 뜨는 문제가 있었습니다. list_part_codes만
-    # 단독으로 호출된 경우도 요약 질문으로 보고 대시보드를 보여줍니다.
-    overview_tools = {"count_defects_by_reason", "list_part_codes", "get_worst_day"}
-    if len(used & overview_tools) >= 2 or used == {"list_part_codes"}:
+    # AI가 그 도구를 (get_recent_defects 등 다른 '현황' 도구와 함께, 또는 그
+    # 도구 하나만으로) "지금 상황이 어때요?" 같은 요약 질문에 답을 끝내는
+    # 경우가 있습니다. 처음엔 list_part_codes 단독 호출만 예외로 뒀는데, 실제
+    # 배포본에서는 list_part_codes + get_recent_defects 조합처럼 요약 질문인데도
+    # 두 조건 다 못 채우는 경우가 있어 "현재 상황 요약" 버튼을 눌러도 차트가
+    # 하나도 안 뜨는 문제가 계속 있었습니다.
+    # 그래서 기준을 이렇게 정리합니다: compare_normal_vs_defect나
+    # get_operating_modes처럼 '특정 원인/조건을 콕 집어 분석'하는 도구를 쓰지
+    # 않았다면, list_part_codes를 썼다는 것 자체가 이미 품번별 현황을 종합해서
+    # 답했다는 뜻이므로 요약 질문으로 보고 대시보드를 보여줍니다.
+    overview_tools = {"count_defects_by_reason", "list_part_codes",
+                      "get_worst_day", "get_recent_defects"}
+    narrow_tools = {"compare_normal_vs_defect", "get_operating_modes"}
+    if not (used & narrow_tools) and (
+        len(used & overview_tools) >= 2 or "list_part_codes" in used
+    ):
         return [{"kind": "overview"}]
 
     trend = next((c for c in ok if c["name"] == "get_worst_day"), None)
