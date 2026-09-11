@@ -2,3 +2,4 @@
 __pycache__/
 *.csv
 !labeled_data.csv
+!synthetic_shift_demo.csv

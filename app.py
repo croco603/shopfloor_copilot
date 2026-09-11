@@ -75,6 +75,14 @@ LANG = {
         "l_same_day": "Normal (same day)",
         "mode_labels": {"저속": "Low speed", "고속": "High speed"},
         "reason_labels": {"가스": "Gas", "미성형": "Short shot", "초기허용불량": "Startup scrap"},
+        # [주야간] 주야간 차트·합성 데이터 안내
+        "t_shift": "Defect rate by shift · combined vs same part and mode",
+        "t_shift_prod": "Production by shift · too little on one shift to compare",
+        "shift_labels": {"주간": "Day shift", "야간": "Night shift"},
+        "l_all": "All combined",
+        "synthetic_banner": ("Synthetic demo data: some production times were shifted to create "
+                             "day-shift records. Sensor values and defect labels are unchanged. "
+                             "This is not a real factory result."),
         "no_sample": "Not enough samples to compare, so the chart is omitted.",
         "b1": "Worst day this week?",
         "b2": "Why gas defects?",
@@ -132,6 +140,13 @@ LANG = {
         "l_same_day": "정상(같은 날)",
         "mode_labels": {"저속": "저속", "고속": "고속"},
         "reason_labels": {"가스": "가스", "미성형": "미성형", "초기허용불량": "초기허용불량"},
+        # [주야간] 주야간 차트·합성 데이터 안내
+        "t_shift": "교대별 불량률 · 전체 합산 vs 같은 품번·조건",
+        "t_shift_prod": "교대별 생산량 · 한쪽 생산이 적어 비교 불가",
+        "shift_labels": {"주간": "주간", "야간": "야간"},
+        "l_all": "전체 합산",
+        "synthetic_banner": ("시연용 합성 데이터입니다. 주간 생산을 만들기 위해 일부 생산 시각만 옮겼고, "
+                             "센서값과 불량 판정은 그대로입니다. 실제 공장 결과가 아닙니다."),
         "no_sample": "이 데이터에서는 비교할 만한 표본이 부족해서 그래프를 생략했습니다.",
         "b1": "이번 주 불량 많았던 날?",
         "b2": "가스 불량 원인은?",
@@ -340,6 +355,10 @@ else:
 # (2020년 데이터를 쓰는 이유를 심사위원이 알 수 있게 기준일 자체는 남겨두되,
 #  존재감은 낮춰서 소개문구에 딸린 부가정보처럼 보이게 합니다.)
 st.caption(f"{T['caption']}  \n{T['ref_date'].format(d=df['date'].max(), n=len(df))}")
+
+# [주야간] 업로드한 파일이 시연용 합성 데이터면, 실제 결과로 오해하지 않게 눈에 띄게 알립니다.
+if f.is_synthetic(df):
+    st.warning(T["synthetic_banner"], icon="🧪")
 
 
 @st.cache_data
@@ -684,6 +703,75 @@ def make_mode_compare_fig(mode_info, T):
 
 
 # ---------------------------------------------------------------------
+# 차트 7. [주야간] 교대별 불량률 — 전체 합산과 같은 품번·조건끼리 비교를 나란히
+# ---------------------------------------------------------------------
+# 합산 막대만 보면 "야간이 문제"처럼 보입니다. 바로 옆에 같은 품번·조건끼리 비교한
+# 막대를 붙여서, 차이가 사라지는지 한눈에 보이게 합니다.
+# 비교할 수 없는 데이터(한쪽 교대 생산이 너무 적음)면 교대별 생산량만 보여줍니다.
+def make_shift_fig(shift_result, T):
+    r = shift_result or {}
+    if r.get("error"):
+        return None
+    labels = T.get("shift_labels", {})
+    names = ("주간", "야간")
+    colors = {"주간": COLOR_MUTED, "야간": COLOR_BLUE}
+
+    if not r.get("comparable"):
+        prod = r.get("production_by_shift") or {}
+        counts = [prod.get(n, 0) for n in names]
+        fig = go.Figure(go.Bar(
+            x=[labels.get(n, n) for n in names], y=counts,
+            marker=dict(color=[colors[n] for n in names], **BAR_MARKER_STYLE),
+            text=[f"{c:,}" for c in counts], textposition="outside", textfont=LABEL_FONT,
+            hovertemplate="%{x}: %{y:,}<extra></extra>",
+        ))
+        fig.update_layout(
+            title=chart_title(T["t_shift_prod"]),
+            height=340,
+            xaxis=axis_style(showgrid=False, linecolor=COLOR_GRID),
+            yaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False),
+            **CHART_BASE_LAYOUT,
+        )
+        return fig
+
+    mode_labels = T.get("mode_labels", {})
+    # 비교할 수 있는 그룹만 그립니다. (몇 건 안 되는 그룹은 막대가 오해를 부릅니다)
+    groups = [g for g in r.get("by_group", []) if g.get("comparable")]
+    # 품번을 지정한 비교면 "RG3 (전체 합산)"처럼 어느 품번의 합산인지 밝힙니다.
+    all_label = f"{r['part_code']} ({T['l_all']})" if r.get("part_code") else T["l_all"]
+    x = [all_label] + [
+        " · ".join(v for v in (g["part_code"], mode_labels.get(g["mode"], g["mode"] or "")) if v)
+        for g in groups
+    ]
+    rows = [r["overall"]] + groups
+
+    fig = go.Figure()
+    for n in names:
+        rates = [row[n]["defect_rate_pct"] for row in rows]
+        fig.add_trace(go.Bar(
+            x=x, y=rates, name=labels.get(n, n),
+            marker=dict(color=colors[n], **BAR_MARKER_STYLE),
+            text=["" if v is None else f"{v}%" for v in rates],
+            textposition="outside", textfont=LABEL_FONT,
+            customdata=[[row[n]["n_defect"], row[n]["total"]] for row in rows],
+            hovertemplate="%{x}<br>%{y}% (%{customdata[0]} / %{customdata[1]:,})<extra></extra>",
+        ))
+    layout = {**CHART_BASE_LAYOUT, "margin": dict(l=10, r=10, t=80, b=10)}
+    fig.update_layout(
+        title=chart_title(T["t_shift"]),
+        barmode="group",
+        bargroupgap=0.15,
+        height=380,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+                    font=LABEL_FONT, bgcolor="rgba(0,0,0,0)"),
+        xaxis=axis_style(showgrid=False, linecolor=COLOR_GRID),
+        yaxis=axis_style(showgrid=True, gridcolor=COLOR_GRID, showline=False, ticksuffix="%"),
+        **layout,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------
 # 답변 아래 차트 — '실제로 호출된 도구'를 보고 정합니다.
 # 질문 문장을 비교하지 않으므로, 사용자가 직접 타이핑해도 차트가 나옵니다.
 # ---------------------------------------------------------------------
@@ -717,11 +805,17 @@ def decide_charts(tool_log, data):
     # 답했다는 뜻이므로 요약 질문으로 보고 대시보드를 보여줍니다.
     overview_tools = {"count_defects_by_reason", "list_part_codes",
                       "get_worst_day", "get_recent_defects"}
-    narrow_tools = {"compare_normal_vs_defect", "get_operating_modes"}
+    narrow_tools = {"compare_normal_vs_defect", "get_operating_modes", "compare_shifts"}
     if not (used & narrow_tools) and (
         len(used & overview_tools) >= 2 or "list_part_codes" in used
     ):
         return [{"kind": "overview"}]
+
+    # [주야간] 교대 비교를 했으면 교대별 차트를 가장 먼저 붙입니다.
+    shift_call = next((c for c in ok if c["name"] == "compare_shifts"), None)
+    if shift_call:
+        spec.append({"kind": "shift",
+                     "part_code": f._normalize_part(shift_call["input"].get("part_code"))})
 
     trend = next((c for c in ok if c["name"] == "get_worst_day"), None)
     if trend:
@@ -783,7 +877,9 @@ def render_answer_charts(spec, data, T, key_prefix="chart"):
     figs = []
     for item in spec:
         kind = item.get("kind")
-        if kind == "trend":
+        if kind == "shift":
+            figs.append(make_shift_fig(f.compare_shifts(data, item.get("part_code")), T))
+        elif kind == "trend":
             figs.append(make_defect_rate_fig(get_daily_defect_rate(data), T,
                                              days=item.get("days")))
         elif kind == "mode":

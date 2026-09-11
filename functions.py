@@ -12,6 +12,8 @@ Claude(에이전트)는 이 함수들을 '도구(tool)'로 호출해서 답을 �
 3. 모든 함수는 실패해도 앱이 죽지 않도록 dict 형태로 결과를 반환합니다.
 """
 
+import math
+
 import pandas as pd
 
 DATA_PATH = "labeled_data.csv"
@@ -1109,6 +1111,198 @@ def suggest_action(df: pd.DataFrame, reason: str = None, part_code: str = None) 
 
 
 # ---------------------------------------------------------------------
+# [주야간] 주간·야간 불량률 비교 — "야간에 불량이 왜 많아요?"
+# ---------------------------------------------------------------------
+# 합쳐서 보면 야간 불량률이 높아도, 그게 '야간이라서'인지는 바로 알 수 없습니다.
+# 야간에 불량률이 원래 높은 품번·조건을 더 많이 돌렸을 수도 있기 때문입니다.
+# (품번 → 운전 조건 교란과 같은 원리) 그래서 이 함수는 항상
+#   1) 양쪽 교대에 비교할 만큼 생산이 있는지 먼저 확인하고
+#   2) 전체 합산 비교와 함께
+#   3) 같은 품번·같은 운전 조건 안에서 주간 vs 야간을 다시 비교합니다.
+DAY_START_HOUR = 8          # 08:00부터 주간
+DAY_END_HOUR = 20           # 20:00부터 야간
+MIN_SHIFT_ROWS = 300        # 한쪽 교대 생산이 이보다 적으면 비교하지 않습니다
+MIN_SHIFT_SHARE = 0.05      # 한쪽 교대 생산이 전체의 5% 미만이어도 비교하지 않습니다
+MIN_GROUP_SHIFT_ROWS = 100  # 품번·조건 그룹 안에서 한쪽 교대가 이보다 적으면 그 그룹은 비교 생략
+MIN_RATE_DIFF_PP = 0.3      # 불량률 차이가 0.3%p보다 작으면 현장에서 의미 없다고 봅니다
+MAX_P_VALUE = 0.05          # 이 정도 차이가 우연히 나올 확률이 5% 이상이면 차이로 보지 않습니다
+
+# 업로드 시연용 합성 데이터에는 이 컬럼에 "SYNTHETIC"이라는 표시가 들어 있습니다.
+# (make_synthetic_shift_data.py 참고) 앱과 AI가 실제 데이터로 착각하지 않게 하는 장치입니다.
+SYNTHETIC_COLUMN = "Data_Note"
+
+
+def is_synthetic(df: pd.DataFrame) -> bool:
+    """합성(시연용) 데이터인지 확인합니다."""
+    return bool(SYNTHETIC_COLUMN in df.columns
+                and df[SYNTHETIC_COLUMN].astype(str).str.contains("SYNTHETIC").any())
+
+
+def _shift_labels(ts: pd.Series) -> pd.Series:
+    hour = ts.dt.hour
+    return ((hour >= DAY_START_HOUR) & (hour < DAY_END_HOUR)).map({True: "주간", False: "야간"})
+
+
+def _two_rate_p_value(d1: int, n1: int, d2: int, n2: int) -> float:
+    """두 불량률의 차이가 우연히 생길 확률(p값)을 계산합니다. (두 비율 z검정)
+    값이 작을수록 '우연이 아니라 진짜 차이'일 가능성이 큽니다.
+    """
+    if not n1 or not n2:
+        return 1.0
+    pooled = (d1 + d2) / (n1 + n2)
+    if pooled in (0, 1):
+        return 1.0
+    se = math.sqrt(pooled * (1 - pooled) * (1 / n1 + 1 / n2))
+    z = (d1 / n1 - d2 / n2) / se
+    return math.erfc(abs(z) / math.sqrt(2))
+
+
+def _shift_rates(sub: pd.DataFrame, shift: pd.Series) -> dict:
+    """주간·야간 각각의 생산 수, 불량 수, 불량률과 둘의 차이를 계산합니다."""
+    out = {}
+    for name in ("주간", "야간"):
+        g = sub[shift == name]
+        n, d = len(g), int((g["PassOrFail"] == "N").sum())
+        out[name] = {"total": n, "n_defect": d,
+                     "defect_rate_pct": round(d / n * 100, 2) if n else None}
+    day, night = out["주간"], out["야간"]
+    if day["total"] and night["total"]:
+        diff = night["defect_rate_pct"] - day["defect_rate_pct"]
+        p = _two_rate_p_value(night["n_defect"], night["total"], day["n_defect"], day["total"])
+        meaningful = abs(diff) >= MIN_RATE_DIFF_PP and p < MAX_P_VALUE
+        out.update({
+            "night_minus_day_pp": round(diff, 2),
+            "p_value": round(p, 4),
+            "meaningful": bool(meaningful),
+            "higher": ("야간" if diff > 0 else "주간") if meaningful else None,
+        })
+    return out
+
+
+def compare_shifts(df: pd.DataFrame, part_code: str = None) -> dict:
+    """주간(08~20시)과 야간(20~08시)의 불량률을 비교합니다.
+
+    - 한쪽 교대 생산이 너무 적으면 비교하지 않고 이유를 돌려줍니다.
+      (기본 KAMP 데이터는 주간 생산이 1.4%뿐이라 여기서 멈춥니다)
+    - 비교할 수 있으면 전체 합산과 함께, 같은 품번·조건 안에서 다시 비교합니다.
+    """
+    part_code = _normalize_part(part_code)
+    sub = df[df["part_code"] == part_code] if part_code else df
+    if part_code and len(sub) == 0:
+        return {"error": f"'{part_code}' 품번 데이터가 없습니다.",
+                "available_parts": sorted(df["part_code"].dropna().unique().tolist())}
+
+    shift = _shift_labels(sub["TimeStamp"])
+    n_day, n_night = int((shift == "주간").sum()), int((shift == "야간").sum())
+    base = {
+        "part_code": part_code,
+        "shift_definition": f"주간 {DAY_START_HOUR:02d}:00~{DAY_END_HOUR - 1:02d}:59 / "
+                            f"야간 {DAY_END_HOUR:02d}:00~{DAY_START_HOUR - 1:02d}:59",
+        "synthetic_data": is_synthetic(df),
+        "production_by_shift": {"주간": n_day, "야간": n_night},
+    }
+    if base["synthetic_data"]:
+        base["synthetic_note"] = ("업로드 시연용 합성 데이터입니다. 실제 공장 결과가 아니므로 "
+                                  "답변 첫 문장에 합성 데이터라는 사실을 밝히세요.")
+
+    # 1) 양쪽 교대에 비교할 만큼 생산이 있는지
+    small = "주간" if n_day <= n_night else "야간"
+    n_small = min(n_day, n_night)
+    share = n_small / len(sub) if len(sub) else 0.0
+    if n_small < MIN_SHIFT_ROWS or share < MIN_SHIFT_SHARE:
+        hours = sorted(sub[shift == small]["TimeStamp"].dt.hour.unique().tolist())
+        reason = (f"{small} 생산이 {n_small:,}건(전체의 {share:.1%})뿐이라 "
+                  f"주간과 야간의 불량률을 비교할 수 없습니다.")
+        if 0 < len(hours) <= 2:
+            reason += (f" 그 {n_small:,}건도 모두 {', '.join(f'{h}시' for h in hours)}대 생산분으로, "
+                       "다른 교대 근무가 조금 넘어간 분량으로 보입니다.")
+        return {**base, "comparable": False, "reason": reason,
+                "guidance": ("비교할 수 없다는 사실과 이유를 먼저 말하세요. "
+                             "'야간에 불량이 많다/적다'고 말하지 마세요.")}
+
+    # 2) 전체 합산 비교
+    overall = _shift_rates(sub, shift)
+
+    # 3) 같은 품번·같은 운전 조건 안에서 다시 비교
+    groups, composition = [], {"주간": [], "야간": []}
+    for code in sorted(sub["part_code"].dropna().unique()):
+        g_all = sub[sub["part_code"] == code]
+        info = detect_operating_modes(df, code)
+        if info.get("has_modes"):
+            col, thr = info["split_variable"], info["threshold"]
+            parts = [("저속", g_all[g_all[col] < thr]), ("고속", g_all[g_all[col] >= thr])]
+        else:
+            parts = [(None, g_all)]
+        for mode, g in parts:
+            if len(g) == 0:
+                continue
+            label = f"{code} {mode}" if mode else code
+            g_shift = shift.loc[g.index]
+            rates = _shift_rates(g, g_shift)
+            both = min(rates["주간"]["total"], rates["야간"]["total"])
+            entry = {"group": label, "part_code": code, "mode": mode, **rates,
+                     "comparable": both >= MIN_GROUP_SHIFT_ROWS}
+            if not entry["comparable"]:
+                if len(g) < MIN_GROUP_SHIFT_ROWS:
+                    entry["note"] = f"전체 생산이 {len(g)}건뿐이라 이 그룹은 비교할 수 없습니다."
+                else:
+                    main = "주간" if rates["주간"]["total"] >= rates["야간"]["total"] else "야간"
+                    entry["note"] = (f"{main}에 주로 생산되어(다른 교대 {both}건) "
+                                     "이 그룹 안에서는 주야간을 비교할 수 없습니다.")
+                for k in ("meaningful", "higher"):
+                    entry.pop(k, None)
+            groups.append(entry)
+
+            if len(g) < 10:
+                continue  # 몇 건 안 되는 품번은 생산 구성표에서 뺍니다
+            group_rate = round((g["PassOrFail"] == "N").mean() * 100, 2)
+            for name in ("주간", "야간"):
+                n_in = rates[name]["total"]
+                total_shift = n_day if name == "주간" else n_night
+                if n_in:
+                    composition[name].append({
+                        "group": label,
+                        "share_of_shift_pct": round(n_in / total_shift * 100, 1),
+                        "group_defect_rate_pct": group_rate,
+                    })
+    for name in composition:
+        composition[name].sort(key=lambda r: r["share_of_shift_pct"], reverse=True)
+
+    compared = [g for g in groups if g["comparable"]]
+    differing = [g for g in compared if g.get("meaningful")]
+
+    if not compared:
+        verdict, note = "cannot_split", (
+            "양쪽 교대에서 함께 생산한 품번·조건이 없어, 차이가 교대 때문인지 "
+            "품번·조건 때문인지 구분할 수 없습니다.")
+    elif differing:
+        names = ", ".join(f"{g['group']}({g['higher']}이 높음)" for g in differing)
+        verdict, note = "group_difference", (
+            f"같은 품번·조건 안에서도 차이가 남는 그룹이 있습니다: {names}. "
+            "다만 작업자, 원료 로트 같은 기록이 없어 교대 자체가 원인이라고 확정할 수는 없습니다.")
+    elif overall.get("meaningful"):
+        higher = overall["higher"]
+        verdict, note = "composition", (
+            f"합쳐서 보면 {higher} 불량률이 더 높지만, 같은 품번·조건끼리 비교하면 뚜렷한 차이가 "
+            f"없습니다. {higher}에 불량률이 높은 품번·조건을 더 많이 생산했기 때문으로 보입니다"
+            "(composition 참고). '야간이라서/주간이라서 불량이 난다'고 말하지 마세요.")
+    else:
+        verdict, note = "no_difference", "주간과 야간의 불량률에 뚜렷한 차이가 없습니다."
+
+    return {
+        **base,
+        "comparable": True,
+        "overall": overall,
+        "by_group": groups,
+        "composition": composition,
+        "verdict": verdict,
+        "note": note,
+        "rule": (f"불량률 차이가 {MIN_RATE_DIFF_PP}%p 이상이고 p값이 {MAX_P_VALUE} 미만일 때만 "
+                 "차이가 있다고 봅니다."),
+    }
+
+
+# ---------------------------------------------------------------------
 # STEP 4. "모른다" 판별 로직 — 심사에서 가장 중요한 부분
 # ---------------------------------------------------------------------
 # 문서의 21개 질문 O/△/X 분류를 여기에 그대로 옮겨 담습니다.
@@ -1119,7 +1313,9 @@ QUESTION_CATALOG = {
     "worst_day": ("O", None),
     "part_defect_rate": ("O", None),
     "cycle_time_5_6": ("Δ", "샘플 20건뿐이고 사이클타임 차이가 0.8초에 그쳐 유의미하다고 보기 어렵습니다."),
-    "day_vs_night": ("X", "전체의 98.6%가 야간(20시~08시) 생산분이라 주야간 비교가 불가능합니다."),
+    # [주야간] 데이터마다 답이 달라서 고정된 X로 두지 않고 compare_shifts로 확인하게 합니다.
+    "day_vs_night": ("Δ", "데이터에 따라 다릅니다. 반드시 compare_shifts를 호출해 comparable 값을 확인하세요. "
+                          "기본 KAMP 데이터는 98.6%가 야간(20시~08시) 생산분이라 비교할 수 없습니다."),
     "equipment_compare": ("X", "설비가 사실상 1대입니다 (7,996건 중 7,992건이 동일 설비)."),
     "predict_next_defect": ("X", "불량이 전체의 0.89%(71건)뿐이라 예측 모델 학습이 불가능합니다."),
     # [수정 F12] 영어 테스트에서 나온 질문 — 데이터로 확인해서 채움
@@ -1180,4 +1376,19 @@ if __name__ == "__main__":
     assert mt["findings"], "원인별로 나누면 금형온도 차이가 보여야 함"
     assert list_part_codes(df, "gas")["parts"][0]["n_defect"] > 0
     assert "reference_date" in get_recent_defects(df)
+
+    # [주야간] 주야간 비교 테스트
+    print("\n=== 주야간 테스트 ===")
+    shift_real = compare_shifts(df)
+    assert shift_real["comparable"] is False, "기본 데이터는 주간 생산이 적어 비교 불가여야 함"
+    print(shift_real["reason"])
+    import os
+    if os.path.exists("synthetic_shift_demo.csv"):
+        demo = load_data("synthetic_shift_demo.csv")
+        shift_demo = compare_shifts(demo)
+        assert is_synthetic(demo) and shift_demo["synthetic_data"] is True
+        assert shift_demo["comparable"] is True
+        assert shift_demo["overall"]["higher"] == "야간", "합성 데이터는 합산 시 야간이 높아야 함"
+        assert shift_demo["verdict"] == "composition", "품번·조건별로는 차이가 없어야 함"
+        print(shift_demo["note"])
     print("모든 테스트 통과")

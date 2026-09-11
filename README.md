@@ -37,6 +37,19 @@ Averages over the whole dataset pointed to the wrong causes three times. The app
 
 When nothing survives these checks, the app says so instead of inventing a cause.
 
+## Sample Upload Data (Synthetic)
+
+`synthetic_shift_demo.csv` is a **synthetic demo file** for trying the upload feature. It is not real factory data.
+
+- The original KAMP data was produced almost entirely at night (98.6%), so day and night shifts cannot be compared.
+  The app says so instead of guessing.
+- To show what a shift comparison looks like, `make_synthetic_shift_data.py` moves the timestamps of some
+  production runs forward by 10 hours. Sensor values, pass/fail labels and defect reasons are unchanged.
+- In this file the night shift looks worse when everything is combined (1.44% vs 0.61%),
+  but within the same part and operating mode the two shifts are similar. The night shift simply ran
+  more of the parts that always have higher defect rates.
+- When this file is uploaded, the app shows a "synthetic data" warning and the agent says so in its answers.
+
 ## Tech Stack
 
 - Python 3.13
