@@ -404,6 +404,31 @@ FUNCTION_MAP = {
 }
 
 
+def translate_text(text: str, target_lang: str) -> str:
+    """답변 텍스트를 다른 언어로 번역합니다.
+
+    언어 토글을 나중에 바꿔도 과거 답변을 화면에서 즉시 보여줄 수 있도록,
+    app.py가 답변 하나를 생성할 때마다 반대 언어 버전을 미리 만들어 함께 저장합니다.
+    (전체 도구 호출을 다시 하지 않고, 이미 나온 답변 문장만 가볍게 번역합니다.)
+    """
+    if not text or not text.strip():
+        return text
+    target_name = "한국어" if target_lang == "ko" else "English"
+    system = (
+        f"다음 텍스트를 {target_name}로 번역하세요.\n"
+        "품번 코드(CN7, RG3 등), 숫자, %, 날짜, 단위는 원래 표기 그대로 유지하세요.\n"
+        "번역한 문장만 출력하고, 다른 설명이나 인사말은 덧붙이지 마세요."
+    )
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=system,
+        messages=[{"role": "user", "content": text}],
+    )
+    translated = "".join(b.text for b in response.content if b.type == "text").strip()
+    return translated or text
+
+
 def ask(question: str, df, history=None, lang: str = "ko", tools_used=None,
         tool_log=None) -> str:
     """사용자 질문 하나를 받아 최종 답변 문자열을 반환합니다.
