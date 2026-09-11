@@ -336,11 +336,15 @@ def render_kpi_row(data, T, key_prefix="kpi"):
          f"{top_part['defect_rate_pct']}%" if top_part else None),
     ]
     # 카드마다 테두리를 둘러서 배경 위에 붕 떠 보이지 않고 하나의 패널처럼 보이게 합니다.
-    # key에 key_prefix + 인덱스를 넣어서, 같은 값의 KPI가 여러 메시지에 걸쳐
-    # 반복돼도 StreamlitDuplicateElementId 에러가 나지 않게 합니다.
+    # [버그 수정] st.metric()은 key 인자를 받지 않습니다(공식 문서 기준 미지원 파라미터라
+    # TypeError가 남). 실제 배포 사이트에서 "현재 상황 요약" 질문에 이 대시보드가
+    # 처음 정상적으로 그려지자마자 이 에러로 죽는 게 확인됐습니다. 같은 KPI가
+    # 여러 메시지에 걸쳐 반복돼도 구분되게 하려던 목적은 st.metric 대신 그걸
+    # 감싸는 st.container 쪽에 key를 줘서 그대로 달성합니다(container는 key를
+    # 지원합니다).
     for i, (col, (label, value, delta)) in enumerate(zip(st.columns(4, gap="medium"), kpis)):
-        with col, st.container(border=True):
-            st.metric(label, value, delta, delta_color="off", key=f"{key_prefix}_{i}")
+        with col, st.container(border=True, key=f"{key_prefix}_{i}"):
+            st.metric(label, value, delta, delta_color="off")
 
 
 def render_chart_card(fig, key=None):
@@ -377,7 +381,12 @@ def make_production_fig(daily, T):
     fig.update_layout(
         title=T["t_prod"],
         height=340,
-        xaxis=dict(showgrid=False, tickformat="%m/%d"),
+        # [버그 수정] 날짜 범위가 좁을 때(예: 최근 7일) plotly가 자동으로 하루보다
+        # 촘촘한 간격(예: 12시간)으로 눈금을 잡아서, tickformat="%m/%d"에는 시간이
+        # 안 보이니까 같은 날짜가 두 번씩 찍혀 보이는 문제가 있었습니다.
+        # dtick을 하루(밀리초 단위 86400000)로 고정해서 항상 하루에 눈금 하나만
+        # 찍히게 합니다.
+        xaxis=dict(showgrid=False, tickformat="%m/%d", dtick=86400000),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False),
         **CHART_BASE_LAYOUT,
     )
@@ -419,7 +428,9 @@ def make_defect_rate_fig(daily, T, days=None):
         title=title,
         height=340,
         showlegend=False,
-        xaxis=dict(showgrid=False, tickformat="%m/%d"),
+        # [버그 수정] make_production_fig와 같은 이유로, 날짜 범위가 좁은
+        # "최근 N일" 질문에서 같은 날짜가 두 번씩 찍히던 문제를 dtick 고정으로 막습니다.
+        xaxis=dict(showgrid=False, tickformat="%m/%d", dtick=86400000),
         yaxis=dict(showgrid=True, gridcolor=COLOR_GRID, zeroline=False, ticksuffix="%"),
         **CHART_BASE_LAYOUT,
     )
